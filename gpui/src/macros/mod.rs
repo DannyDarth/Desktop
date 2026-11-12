@@ -296,6 +296,40 @@ impl Drop for Engine {
     }
 }
 
+/// The newest detected game takes priority; closing it restores another running game.
+pub fn choose_game(
+    current: Option<&str>,
+    previous: &[String],
+    running: &[String],
+) -> Option<String> {
+    running
+        .iter()
+        .rev()
+        .find(|id| !previous.contains(id))
+        .cloned()
+        .or_else(|| {
+            current
+                .filter(|id| running.iter().any(|r| r == id))
+                .map(str::to_owned)
+        })
+        .or_else(|| running.last().cloned())
+}
+fn persist(path: Option<&std::path::Path>, library: &Library) -> Result<(), String> {
+    let path = path.ok_or("No configuration folder is available.")?;
+    std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
+    let temp = path.with_extension("json.tmp");
+    std::fs::write(
+        &temp,
+        serde_json::to_vec_pretty(library).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
+    #[cfg(windows)]
+    windows::replace_file(&temp, path)?;
+    #[cfg(not(windows))]
+    std::fs::rename(&temp, path).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -355,38 +389,35 @@ mod tests {
         let decoded: Library = serde_json::from_str(&serde_json::to_string(&l).unwrap()).unwrap();
         assert_eq!(decoded.macros[0].steps[1].action, key(false).action);
     }
-}
-
-/// The newest detected game takes priority; closing it restores another running game.
-pub fn choose_game(
-    current: Option<&str>,
-    previous: &[String],
-    running: &[String],
-) -> Option<String> {
-    running
-        .iter()
-        .rev()
-        .find(|id| !previous.contains(id))
-        .cloned()
-        .or_else(|| {
-            current
-                .filter(|id| running.iter().any(|r| r == id))
-                .map(str::to_owned)
-        })
-        .or_else(|| running.last().cloned())
-}
-fn persist(path: Option<&std::path::Path>, library: &Library) -> Result<(), String> {
-    let path = path.ok_or("No configuration folder is available.")?;
-    std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
-    let temp = path.with_extension("json.tmp");
-    std::fs::write(
-        &temp,
-        serde_json::to_vec_pretty(library).map_err(|e| e.to_string())?,
-    )
-    .map_err(|e| e.to_string())?;
-    #[cfg(windows)]
-    windows::replace_file(&temp, path)?;
-    #[cfg(not(windows))]
-    std::fs::rename(&temp, path).map_err(|e| e.to_string())?;
-    Ok(())
+    #[test]
+    fn game_switch_cancels_work_without_disabling_triggers() {
+        let e = Engine {
+            state: Arc::new(Mutex::new(State {
+                snapshot: Snapshot {
+                    library: Library {
+                        enabled: true,
+                        macros: vec![],
+                    },
+                    recording: Some(0),
+                    playing: true,
+                    message: String::new(),
+                    active_game: Some("one".into()),
+                    running_games: vec!["one".into()],
+                },
+                capture: Some((0, std::time::Instant::now())),
+                draft: vec![key(true)],
+                finish_requested: false,
+            })),
+            cancel: Arc::new(AtomicBool::new(false)),
+            path: None,
+        };
+        assert!(e.sync_games(vec!["one".into(), "two".into()]));
+        assert!(e.cancel.load(Ordering::SeqCst));
+        let s = e.state.lock().unwrap();
+        assert_eq!(s.snapshot.active_game.as_deref(), Some("two"));
+        assert!(s.snapshot.recording.is_none());
+        assert!(s.capture.is_none());
+        assert!(s.draft.is_empty());
+        assert!(s.snapshot.library.enabled);
+    }
 }
