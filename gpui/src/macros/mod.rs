@@ -56,6 +56,24 @@ pub struct Library {
     pub macros: Vec<Macro>,
 }
 impl Library {
+    /// The delay belongs to its event and travels with it. Playback validation
+    /// rejects a release before its press or overlapping duplicate presses.
+    pub fn move_step(&mut self, macro_index: usize, from: usize, to: usize) -> Result<(), String> {
+        let mut next = self.clone();
+        let m = next
+            .macros
+            .get_mut(macro_index)
+            .ok_or("Macro no longer exists.")?;
+        if from >= m.steps.len() || to >= m.steps.len() {
+            return Err("Step no longer exists.".into());
+        }
+        let step = m.steps.remove(from);
+        m.steps.insert(to, step);
+        next.validate()
+            .map_err(|e| format!("Cannot move this step: {e}"))?;
+        *self = next;
+        Ok(())
+    }
     pub fn validate(&self) -> Result<(), String> {
         if self.macros.len() > 64 {
             return Err("At most 64 macros are supported.".into());
@@ -222,11 +240,21 @@ impl Engine {
         snapshot
     }
     pub fn edit(&self, change: impl FnOnce(&mut Library)) {
+        self.update(|library| {
+            change(library);
+            Ok(())
+        });
+    }
+    pub fn move_step(&self, macro_index: usize, from: usize, to: usize) {
+        self.update(|library| library.move_step(macro_index, from, to));
+    }
+    fn update(&self, change: impl FnOnce(&mut Library) -> Result<(), String>) {
         self.stop();
         let mut s = self.state.lock().unwrap();
         let mut next = s.snapshot.library.clone();
-        change(&mut next);
-        let result = next.validate().and_then(|_| self.save(&next));
+        let result = change(&mut next)
+            .and_then(|_| next.validate())
+            .and_then(|_| self.save(&next));
         match result {
             Ok(()) => {
                 s.snapshot.library = next;
@@ -435,5 +463,68 @@ mod tests {
         assert!(s.capture.is_none());
         assert!(s.draft.is_empty());
         assert!(s.snapshot.library.enabled);
+    }
+    #[test]
+    fn mouse_press_can_wrap_keyboard_steps_and_keep_its_delay() {
+        let mut l = library(vec![
+            key(true),
+            key(false),
+            Step {
+                delay_ms: 25,
+                action: Action::Mouse {
+                    button: 1,
+                    down: true,
+                },
+            },
+            Step {
+                delay_ms: 40,
+                action: Action::Mouse {
+                    button: 1,
+                    down: false,
+                },
+            },
+            Step {
+                delay_ms: 10,
+                action: Action::Key {
+                    code: 0x42,
+                    down: true,
+                },
+            },
+            Step {
+                delay_ms: 10,
+                action: Action::Key {
+                    code: 0x42,
+                    down: false,
+                },
+            },
+        ]);
+        l.move_step(0, 2, 0).unwrap();
+        l.move_step(0, 3, 5).unwrap();
+        assert_eq!(
+            l.macros[0].steps[0].action,
+            Action::Mouse {
+                button: 1,
+                down: true
+            }
+        );
+        assert_eq!(l.macros[0].steps[0].delay_ms, 25);
+        assert_eq!(
+            l.macros[0].steps[5].action,
+            Action::Mouse {
+                button: 1,
+                down: false
+            }
+        );
+        assert_eq!(l.macros[0].steps[5].delay_ms, 40);
+        assert!(l.validate().is_ok());
+    }
+    #[test]
+    fn invalid_move_keeps_the_original_sequence() {
+        let mut l = library(vec![key(true), key(false)]);
+        let before = serde_json::to_string(&l).unwrap();
+        assert!(l.move_step(0, 1, 0).is_err());
+        assert!(l.move_step(0, 0, 9).is_err());
+        assert!(l.move_step(9, 0, 1).is_err());
+        assert_eq!(serde_json::to_string(&l).unwrap(), before);
     }
 }

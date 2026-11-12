@@ -244,7 +244,28 @@ impl AppView {
                 }
                 editor = editor.child(live);
             } else {
+                editor = editor.child(div().text_xs().text_color(cx.theme().muted_foreground)
+                    .child("Reorder presses and releases separately. Delays move with their events. A release must stay after its matching press."));
                 for (j, step) in m.steps.iter().enumerate() {
+                    let last = m.steps.len() - 1;
+                    let mut moves = h_flex().gap_1().flex_wrap();
+                    for (action, label, target) in [
+                        ("first", "To start", 0),
+                        ("up", "Up", j.saturating_sub(1)),
+                        ("down", "Down", (j + 1).min(last)),
+                        ("last", "To end", last),
+                    ] {
+                        moves = moves.child(
+                            Button::new(SharedString::from(format!("macro-move-{action}-{j}")))
+                                .compact()
+                                .label(label)
+                                .disabled(busy || target == j)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.macro_engine.move_step(i, j, target);
+                                    cx.notify();
+                                })),
+                        );
+                    }
                     editor = editor.child(
                         h_flex()
                             .gap_2()
@@ -255,6 +276,7 @@ impl AppView {
                                 j + 1,
                                 crate::macros::step_label(step)
                             )))
+                            .child(moves)
                             .child(
                                 Button::new(SharedString::from(format!("macro-delay-less-{j}")))
                                     .label("−10 ms")
