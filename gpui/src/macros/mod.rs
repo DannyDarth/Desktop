@@ -153,6 +153,8 @@ pub fn step_label(step: &Step) -> String {
 pub struct Snapshot {
     pub library: Library,
     pub recording: Option<usize>,
+    /// Unsaved input captured by the recorder; never replaces the saved macro until F8.
+    pub recorded_steps: Vec<Step>,
     pub playing: bool,
     pub message: String,
     pub active_game: Option<String>,
@@ -187,6 +189,7 @@ impl Engine {
                 snapshot: Snapshot {
                     library,
                     recording: None,
+                    recorded_steps: Vec::new(),
                     playing: false,
                     message,
                     active_game: None,
@@ -209,7 +212,14 @@ impl Engine {
         );
     }
     pub fn snapshot(&self) -> Snapshot {
-        self.state.lock().unwrap().snapshot.clone()
+        let state = self.state.lock().unwrap();
+        let mut snapshot = state.snapshot.clone();
+        snapshot.recorded_steps = if snapshot.recording.is_some() {
+            state.draft.clone()
+        } else {
+            Vec::new()
+        };
+        snapshot
     }
     pub fn edit(&self, change: impl FnOnce(&mut Library)) {
         self.stop();
@@ -399,6 +409,7 @@ mod tests {
                         macros: vec![],
                     },
                     recording: Some(0),
+                    recorded_steps: Vec::new(),
                     playing: true,
                     message: String::new(),
                     active_game: Some("one".into()),
@@ -411,7 +422,12 @@ mod tests {
             cancel: Arc::new(AtomicBool::new(false)),
             path: None,
         };
+        let live = e.snapshot();
+        assert_eq!(live.recorded_steps.len(), 1);
+        assert_eq!(live.recorded_steps[0].action, key(true).action);
+        assert!(live.library.macros.is_empty());
         assert!(e.sync_games(vec!["one".into(), "two".into()]));
+        assert!(e.snapshot().recorded_steps.is_empty());
         assert!(e.cancel.load(Ordering::SeqCst));
         let s = e.state.lock().unwrap();
         assert_eq!(s.snapshot.active_game.as_deref(), Some("two"));

@@ -70,7 +70,11 @@ impl AppView {
                     "{} · {} · {} steps",
                     m.name,
                     m.trigger.label(),
-                    m.steps.len()
+                    if state.recording == Some(i) {
+                        state.recorded_steps.len()
+                    } else {
+                        m.steps.len()
+                    }
                 ),
                 selected == Some(i),
                 cx,
@@ -194,43 +198,90 @@ impl AppView {
                             })),
                     ),
             );
-            for (j, step) in m.steps.iter().enumerate() {
-                editor = editor.child(
-                    h_flex()
-                        .gap_2()
-                        .items_center()
-                        .flex_wrap()
-                        .child(div().min_w(px(220.)).text_sm().child(format!(
-                            "{}. {}",
-                            j + 1,
-                            crate::macros::step_label(step)
-                        )))
-                        .child(
-                            Button::new(SharedString::from(format!("macro-delay-less-{j}")))
-                                .label("−10 ms")
-                                .disabled(busy || step.delay_ms == 0)
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.macro_engine.edit(|l| {
-                                        l.macros[i].steps[j].delay_ms =
-                                            l.macros[i].steps[j].delay_ms.saturating_sub(10)
-                                    });
-                                    cx.notify();
-                                })),
-                        )
-                        .child(format!("{} ms", step.delay_ms))
-                        .child(
-                            Button::new(SharedString::from(format!("macro-delay-more-{j}")))
-                                .label("+10 ms")
-                                .disabled(busy || step.delay_ms >= 60_000)
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.macro_engine.edit(|l| {
-                                        l.macros[i].steps[j].delay_ms =
-                                            (l.macros[i].steps[j].delay_ms + 10).min(60_000)
-                                    });
-                                    cx.notify();
-                                })),
-                        ),
-                );
+            if state.recording == Some(i) {
+                let mut live = div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .p_3()
+                    .border_1()
+                    .border_color(cx.theme().primary)
+                    .rounded(cx.theme().radius)
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(format!(
+                                "Live input · {} events recorded",
+                                state.recorded_steps.len()
+                            )),
+                    );
+                if state.recorded_steps.is_empty() {
+                    live = live.child(div().text_sm().text_color(cx.theme().muted_foreground)
+                        .child("After the countdown, press a key or click a mouse button. F8 saves; Escape cancels."));
+                } else {
+                    live = live.child(div().text_xs().text_color(cx.theme().muted_foreground)
+                        .child("Latest events first (up to 12 shown). All captured events are saved with F8."));
+                    for (j, step) in state.recorded_steps.iter().enumerate().rev().take(12) {
+                        live = live.child(
+                            h_flex()
+                                .gap_3()
+                                .items_center()
+                                .flex_wrap()
+                                .child(div().min_w(px(220.)).text_sm().child(format!(
+                                    "{}. {}",
+                                    j + 1,
+                                    crate::macros::step_label(step)
+                                )))
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(format!("{} ms", step.delay_ms)),
+                                ),
+                        );
+                    }
+                }
+                editor = editor.child(live);
+            } else {
+                for (j, step) in m.steps.iter().enumerate() {
+                    editor = editor.child(
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .flex_wrap()
+                            .child(div().min_w(px(220.)).text_sm().child(format!(
+                                "{}. {}",
+                                j + 1,
+                                crate::macros::step_label(step)
+                            )))
+                            .child(
+                                Button::new(SharedString::from(format!("macro-delay-less-{j}")))
+                                    .label("−10 ms")
+                                    .disabled(busy || step.delay_ms == 0)
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.macro_engine.edit(|l| {
+                                            l.macros[i].steps[j].delay_ms =
+                                                l.macros[i].steps[j].delay_ms.saturating_sub(10)
+                                        });
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(format!("{} ms", step.delay_ms))
+                            .child(
+                                Button::new(SharedString::from(format!("macro-delay-more-{j}")))
+                                    .label("+10 ms")
+                                    .disabled(busy || step.delay_ms >= 60_000)
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.macro_engine.edit(|l| {
+                                            l.macros[i].steps[j].delay_ms =
+                                                (l.macros[i].steps[j].delay_ms + 10).min(60_000)
+                                        });
+                                        cx.notify();
+                                    })),
+                            ),
+                    );
+                }
             }
         }
         div().id("macros-page").size_full().overflow_y_scroll().p(px(PAGE_PAD)).child(
