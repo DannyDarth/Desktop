@@ -180,7 +180,7 @@ pub(super) fn play(state: &Arc<Mutex<State>>, cancel: &Arc<AtomicBool>, index: u
         s.snapshot.message = "This macro is not in the active game set.".into();
         return;
     }
-    if let Err(e) = s.snapshot.library.validate() {
+    if let Some(e) = s.snapshot.library.playback_error(index) {
         s.snapshot.message = e;
         return;
     }
@@ -297,7 +297,8 @@ pub(super) fn start(weak: Weak<Mutex<State>>, cancel: Arc<AtomicBool>, path: Opt
                         m.steps = draft;
                     }
                     match next
-                        .validate()
+                        .validate_editing()
+                        .and_then(|_| next.playback_error(index).map_or(Ok(()), Err))
                         .and_then(|_| persist(path.as_deref(), &next))
                     {
                         Ok(()) => {

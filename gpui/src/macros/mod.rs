@@ -69,12 +69,30 @@ impl Library {
         }
         let step = m.steps.remove(from);
         m.steps.insert(to, step);
-        next.validate()
+        next.validate_editing()
             .map_err(|e| format!("Cannot move this step: {e}"))?;
         *self = next;
         Ok(())
     }
     pub fn validate(&self) -> Result<(), String> {
+        self.validate_inner(true)
+    }
+    /// An unfinished order can be saved and reopened while playback remains blocked.
+    pub fn validate_editing(&self) -> Result<(), String> {
+        self.validate_inner(false)
+    }
+    pub fn playback_error(&self, index: usize) -> Option<String> {
+        let Some(m) = self.macros.get(index) else {
+            return Some("Macro no longer exists.".into());
+        };
+        Library {
+            enabled: false,
+            macros: vec![m.clone()],
+        }
+        .validate()
+        .err()
+    }
+    fn validate_inner(&self, check_order: bool) -> Result<(), String> {
         if self.macros.len() > 64 {
             return Err("At most 64 macros are supported.".into());
         }
@@ -110,6 +128,9 @@ impl Library {
                     }
                     _ => return Err("Unsupported input in macro.".into()),
                 };
+                if !check_order {
+                    continue;
+                }
                 if down {
                     if !held.insert(key) {
                         return Err("A key is pressed twice without a release.".into());
@@ -118,8 +139,8 @@ impl Library {
                     return Err("A release has no matching press.".into());
                 }
             }
-            if !held.is_empty() {
-                return Err("Release every recorded key and button before saving.".into());
+            if check_order && !held.is_empty() {
+                return Err("Every press needs a matching release before playback.".into());
             }
             if duration * u64::from(m.repeats) > 600_000 {
                 return Err("Playback is limited to ten minutes.".into());
@@ -195,7 +216,7 @@ impl Engine {
         let loaded = path.as_ref().and_then(|p| std::fs::read(p).ok()).map(|b| {
             serde_json::from_slice::<Library>(&b)
                 .map_err(|e| e.to_string())
-                .and_then(|l| l.validate().map(|_| l))
+                .and_then(|l| l.validate_editing().map(|_| l))
         });
         let (library, message) = match loaded {
             Some(Ok(l)) => (l, String::new()),
@@ -253,7 +274,7 @@ impl Engine {
         let mut s = self.state.lock().unwrap();
         let mut next = s.snapshot.library.clone();
         let result = change(&mut next)
-            .and_then(|_| next.validate())
+            .and_then(|_| next.validate_editing())
             .and_then(|_| self.save(&next));
         match result {
             Ok(()) => {
@@ -522,9 +543,29 @@ mod tests {
     fn invalid_move_keeps_the_original_sequence() {
         let mut l = library(vec![key(true), key(false)]);
         let before = serde_json::to_string(&l).unwrap();
-        assert!(l.move_step(0, 1, 0).is_err());
         assert!(l.move_step(0, 0, 9).is_err());
         assert!(l.move_step(9, 0, 1).is_err());
         assert_eq!(serde_json::to_string(&l).unwrap(), before);
+    }
+    #[test]
+    fn temporary_order_can_be_saved_and_repaired() {
+        let mut l = library(vec![key(true), key(false)]);
+        l.move_step(0, 1, 0).unwrap();
+        assert!(l.validate_editing().is_ok());
+        assert!(l.playback_error(0).is_some());
+        let mut reopened: Library =
+            serde_json::from_str(&serde_json::to_string(&l).unwrap()).unwrap();
+        reopened.validate_editing().unwrap();
+        reopened.move_step(0, 0, 1).unwrap();
+        assert!(reopened.playback_error(0).is_none());
+    }
+    #[test]
+    fn unfinished_macro_does_not_block_other_macros() {
+        let mut l = library(vec![key(false), key(true)]);
+        let mut valid = library(vec![key(true), key(false)]).macros.remove(0);
+        valid.trigger = Trigger::Shortcut { key: 0x76 };
+        l.macros.push(valid);
+        assert!(l.playback_error(0).is_some());
+        assert!(l.playback_error(1).is_none());
     }
 }

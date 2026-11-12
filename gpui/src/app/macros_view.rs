@@ -90,6 +90,7 @@ impl AppView {
         let mut editor = div().flex().flex_col().gap_3();
         if let Some(i) = selected {
             let m = &state.library.macros[i];
+            let playback_error = state.library.playback_error(i);
             editor = editor
                 .child(
                     div()
@@ -123,6 +124,7 @@ impl AppView {
                                     !cfg!(windows)
                                         || busy
                                         || m.steps.is_empty()
+                                        || playback_error.is_some()
                                         || scope != state.active_game,
                                 )
                                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -198,6 +200,11 @@ impl AppView {
                             })),
                     ),
             );
+            if let Some(error) = playback_error {
+                editor = editor.child(div().text_sm().text_color(cx.theme().danger).child(
+                    format!("Order saved. Playback is paused until the order is complete: {error}"),
+                ));
+            }
             if state.recording == Some(i) {
                 let mut live = div()
                     .flex()
@@ -245,7 +252,7 @@ impl AppView {
                 editor = editor.child(live);
             } else {
                 editor = editor.child(div().text_xs().text_color(cx.theme().muted_foreground)
-                    .child("Reorder presses and releases separately. Delays move with their events. A release must stay after its matching press."));
+                    .child("Move any keyboard or mouse event freely. Delays move with their events. Complete the press/release order to enable playback."));
                 for (j, step) in m.steps.iter().enumerate() {
                     let last = m.steps.len() - 1;
                     let mut moves = h_flex().gap_1().flex_wrap();
