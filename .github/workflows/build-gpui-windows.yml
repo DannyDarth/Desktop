@@ -1,11 +1,16 @@
 name: Build (Windows)
 
 # Builds the native GPUI app (gpui/) and its installer on Windows, runs the
-# tests, and uploads the installer so any push can be downloaded and tried.
+# tests, and uploads a portable ZIP. Installers can be requested manually.
 # Runs on every push to main and gpui, on pull requests, and by hand from the
 # Actions tab. Tagged releases are published by release.yml.
 on:
   workflow_dispatch:
+    inputs:
+      build_installer:
+        description: Also build the Windows installer
+        type: boolean
+        default: false
   push:
     branches: [main, gpui]
   pull_request:
@@ -59,18 +64,51 @@ jobs:
         run: cargo build --profile ci
         working-directory: gpui
 
+      - name: Package portable app
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force portable | Out-Null
+          Copy-Item gpui/target/ci/openmouse-gpui.exe portable/OpenMouseDesktop.exe
+          Copy-Item .github/portable-readme.txt portable/README.txt
+          "Commit: $env:GITHUB_SHA" | Set-Content portable/BUILD.txt
+
+      - name: Smoke test portable executable
+        shell: pwsh
+        run: |
+          $output = Join-Path $env:RUNNER_TEMP 'openmouse-portable-devices.json'
+          Remove-Item $output -ErrorAction SilentlyContinue
+          $process = Start-Process -FilePath (Resolve-Path portable/OpenMouseDesktop.exe) -ArgumentList @('--list-supported', ('"{0}"' -f $output)) -PassThru
+          if (-not $process.WaitForExit(60000)) {
+            $process.Kill()
+            throw 'Portable executable did not finish its headless smoke test.'
+          }
+          if ($process.ExitCode -ne 0) { throw "Portable executable exited with $($process.ExitCode)." }
+          if (-not (Test-Path $output)) { throw 'Portable executable did not write its device list.' }
+          $null = Get-Content $output -Raw | ConvertFrom-Json
+
+      # GitHub creates the downloadable ZIP. Upload the files directly so there
+      # is no ZIP nested inside another ZIP.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: openmouse-windows-portable
+          path: portable/*
+          if-no-files-found: error
+
       # Needs the app's .exe to exist first: its build.rs embeds those bytes
       # as the installer's payload (see gpui/installer/build.rs).
       - name: Build installer
+        if: github.event_name == 'workflow_dispatch' && inputs.build_installer
         run: cargo build --release
         working-directory: gpui/installer
         env:
           OPENMOUSE_GPUI_EXE: ../target/ci/openmouse-gpui.exe
 
       - name: Rename installer artifact
+        if: github.event_name == 'workflow_dispatch' && inputs.build_installer
         run: cp gpui/installer/target/release/openmouse-installer.exe OpenMouseDesktopSetup.exe
 
       - uses: actions/upload-artifact@v4
+        if: github.event_name == 'workflow_dispatch' && inputs.build_installer
         with:
           name: openmouse-windows
           path: OpenMouseDesktopSetup.exe

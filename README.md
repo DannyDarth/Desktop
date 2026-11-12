@@ -77,3 +77,20 @@ Engine checks without the GUI toolchain:
 ```sh
 cargo test --manifest-path gpui/tests/macro-core/Cargo.toml --locked
 ```
+
+## Portable Windows testing
+
+The Windows build workflow produces **openmouse-windows-portable**. Download the
+artifact, extract it, and run `OpenMouseDesktop.exe`. No installation is required.
+Use the tray menu's Quit command before replacing builds or launching a different
+copy; closing the window leaves it running.
+
+Portable testing shares `%APPDATA%\openmouse` with the installed app, so settings,
+macros and game profiles remain available when switching builds or moving to the
+installer under the same Windows account. This is an install-free executable,
+not a roaming settings bundle. The ZIP includes a README and source commit ID.
+
+Pull-request builds now produce the portable artifact by default. To package an
+installer from the same code, manually run **Build (Windows)** on the desired
+branch with **Also build the Windows installer** enabled. Tagged release
+packaging remains available through the existing release workflow.
