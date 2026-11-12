@@ -237,6 +237,7 @@ pub(super) fn start(weak: Weak<Mutex<State>>, cancel: Arc<AtomicBool>, path: Opt
         let mut recording = None;
         let mut held: HashSet<u16> = HashSet::new();
         let mut triggers = HashSet::new();
+        let mut after_playback = false;
         loop {
             std::thread::sleep(Duration::from_millis(8));
             let Some(state) = weak.upgrade() else {
@@ -244,11 +245,20 @@ pub(super) fn start(weak: Weak<Mutex<State>>, cancel: Arc<AtomicBool>, path: Opt
             };
             let mut s = state.lock().unwrap();
             if s.snapshot.playing {
+                after_playback = true;
                 previous = sample();
                 triggers.clear();
                 continue;
             }
             let now = sample();
+            if after_playback {
+                previous = now.clone();
+                triggers.clear();
+                if now.is_empty() {
+                    after_playback = false;
+                }
+                continue;
+            }
             if down(0x1b) {
                 cancel.store(true, Ordering::SeqCst);
                 s.capture = None;

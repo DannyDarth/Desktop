@@ -100,22 +100,15 @@ impl AppView {
                         .child(
                             Button::new("macro-record")
                                 .label(if state.recording == Some(i) {
-                                    "Finish recording (F8)"
+                                    "F8 saves recording"
                                 } else {
                                     "Record input"
                                 })
                                 .disabled(
-                                    !cfg!(windows)
-                                        || state.playing
-                                        || (state.recording.is_some()
-                                            && state.recording != Some(i)),
+                                    !cfg!(windows) || state.playing || state.recording.is_some(),
                                 )
                                 .on_click(cx.listener(move |this, _, _, cx| {
-                                    if this.macro_engine.snapshot().recording.is_some() {
-                                        this.macro_engine.finish_recording();
-                                    } else {
-                                        this.macro_engine.record(i);
-                                    }
+                                    this.macro_engine.record(i);
                                     cx.notify();
                                 })),
                         )
