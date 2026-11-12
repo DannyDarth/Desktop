@@ -1,3 +1,4 @@
+mod macros_view;
 use crate::games::{self, Game};
 use crate::settings::{Settings, MAX_BLUR, MAX_VIBRANCY, MIN_OPACITY};
 use crate::theme::ThemeChoice;
@@ -163,6 +164,7 @@ pub enum Page {
     Overview,
     Games,
     Supported,
+    Macros,
     Settings,
     /// Version and release notes; opened from the sidebar footer, not the nav list.
     Updates,
@@ -174,6 +176,7 @@ impl Page {
             Page::Overview => "Overview",
             Page::Games => "Games",
             Page::Supported => "Supported mice",
+            Page::Macros => "Macros",
             Page::Settings => "Settings",
             Page::Updates => "Updates",
         }
@@ -184,6 +187,7 @@ impl Page {
             Page::Overview => IconName::LayoutDashboard,
             Page::Games => IconName::Gamepad2,
             Page::Supported => IconName::BookOpen,
+            Page::Macros => IconName::Keyboard,
             Page::Settings => IconName::Settings,
             Page::Updates => IconName::CircleArrowUp,
         }
@@ -461,6 +465,9 @@ pub struct AppView {
     page: Page,
     sidebar_collapsed: bool,
     settings: Settings,
+    macro_engine: crate::macros::Engine,
+    macro_scope: Option<String>,
+    macro_selected: Option<usize>,
     games: Vec<Game>,
     devices: Devices,
     hid: Option<crate::hid::HidService>,
@@ -606,6 +613,9 @@ impl AppView {
         let game_watcher = crate::game_watcher::GameWatcher::start(cx);
         let mut view = Self {
             page: Page::Overview,
+            macro_engine: crate::macros::Engine::load(),
+            macro_scope: None,
+            macro_selected: None,
             sidebar_collapsed: false,
             settings,
             games,
@@ -644,6 +654,13 @@ impl AppView {
         if view.settings.discord_presence {
             view.set_discord(true, cx);
         }
+        view.macro_engine.start();
+        cx.spawn(async move |view, cx| {
+            loop {
+                futures_timer::Delay::new(Duration::from_millis(150)).await;
+                if view.update(cx, |v, cx| { if v.page == Page::Macros { cx.notify(); } }).is_err() { break; }
+            }
+        }).detach();
         view.scan_devices(cx);
         view
     }
@@ -662,6 +679,9 @@ impl Default for AppView {
             control_sliders: Default::default(),
             slider_live: Default::default(),
             slider_seq: 0,
+            macro_engine: crate::macros::Engine::load(),
+            macro_scope: None,
+            macro_selected: None,
             sidebar_collapsed: false,
             settings: Settings::default(),
             games: Vec::new(),
@@ -1397,6 +1417,13 @@ impl AppView {
         if crate::game_watcher::apply_updates(&mut self.games, updates) {
             cx.notify();
             self.refresh_presence(cx);
+        }
+        let mut running: Vec<String> = self.games.iter().filter(|g| g.running && !started.contains(&g.id)).map(|g| g.id.clone()).collect();
+        running.extend(started.iter().cloned());
+        if self.macro_engine.sync_games(running) {
+            self.macro_scope = self.macro_engine.snapshot().active_game;
+            self.macro_selected = None;
+            cx.notify();
         }
         for id in closed {
             self.on_game_closed(&id, cx);
@@ -2152,7 +2179,7 @@ impl AppView {
         let accent = cx.theme().primary;
 
         let mut nav = div().flex().flex_col().gap_1();
-        for (id, page) in [("nav-overview", Page::Overview), ("nav-games", Page::Games), ("nav-supported", Page::Supported)] {
+        for (id, page) in [("nav-overview", Page::Overview), ("nav-games", Page::Games), ("nav-macros", Page::Macros), ("nav-supported", Page::Supported)] {
             nav = nav.child(self.nav_row(id, page.icon(), page.label(), self.page == page, collapsed, cx).on_click(
                 cx.listener(move |this, _, _, cx| {
                     // Choosing the page you are on goes back to its top level.
@@ -2288,6 +2315,7 @@ impl AppView {
     }
 
     fn render_page(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        if self.page == Page::Macros { return self.render_macros(cx); }
         if self.page == Page::Settings {
             return self.render_settings(window, cx);
         }
@@ -3672,6 +3700,7 @@ impl AppView {
         let border = cx.theme().border;
         let name = self.game_name(game_id);
         let target = self.profile_target();
+        let macro_game = game_id.to_owned();
 
         let header = h_flex()
             .gap_3()
@@ -3693,7 +3722,8 @@ impl AppView {
                     .flex_col()
                     .child(div().text_xl().font_weight(FontWeight::SEMIBOLD).text_color(fg).child(name))
                     .child(div().text_sm().text_color(muted).child("Device profile")),
-            );
+            )
+            .child(Button::new("game-macros").label("Macros").on_click(cx.listener(move |this, _, _, cx| { this.macro_scope = Some(macro_game.clone()); this.macro_selected = None; this.page = Page::Macros; cx.notify(); })));
 
         // Device picker: one chip per device. A device that isn't connected yet is
         // connected when picked, since its options come from the device itself.

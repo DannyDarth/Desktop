@@ -18,3 +18,5 @@ pub mod theme;
 pub mod update_check;
 #[cfg(windows)]
 mod wallpaper_win;
+
+pub mod macros;

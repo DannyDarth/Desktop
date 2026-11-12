@@ -49,6 +49,7 @@ fn main() {
         // opens straight on that page (handy for profiling and screenshots).
         if let Some(page) = std::env::var("OPENMOUSE_START_PAGE").ok().and_then(|name| match name.as_str() {
             "updates" | "whatsnew" => Some(openmouse_gpui::app::Page::Updates),
+            "macros" => Some(openmouse_gpui::app::Page::Macros),
             "games" => Some(openmouse_gpui::app::Page::Games),
             "settings" => Some(openmouse_gpui::app::Page::Settings),
             "supported" => Some(openmouse_gpui::app::Page::Supported),

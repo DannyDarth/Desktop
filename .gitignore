@@ -15,3 +15,6 @@ crates/*/target/
 
 # Leftover build output from the retired Tauri app
 src-tauri/
+
+# Isolated macro engine checks
+gpui/tests/macro-core/target/
