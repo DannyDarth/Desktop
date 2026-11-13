@@ -817,7 +817,7 @@ impl AppView {
         self.hid.get_or_insert_with(crate::hid::HidService::start).clone()
     }
 
-    /// Lists supported devices, loads their artwork, and connects the first.
+    /// Lists supported devices and connects each idle device sequentially.
     /// Everything blocking runs on `crate::hid`'s threads or the background
     /// executor.
     fn scan_devices(&mut self, cx: &mut Context<Self>) {
@@ -852,7 +852,11 @@ impl AppView {
                     .iter()
                     .map(|c| {
                         match old.iter().position(|t| t.key == c.info.key) {
-                            Some(i) => old.swap_remove(i),
+                            Some(i) => {
+                                let mut tile = old.swap_remove(i);
+                                if matches!(tile.status, TileStatus::Failed(_)) { tile.status = TileStatus::Idle; }
+                                tile
+                            },
                             None => Tile {
                                 key: c.info.key.clone(),
                                 name: c.info.product_string.clone(),
@@ -866,6 +870,7 @@ impl AppView {
                     .collect();
                 v.devices.selected = v.devices.selected.min(v.devices.tiles.len().saturating_sub(1));
                 v.devices.scanning = false;
+                v.connect_next_device(cx);
                 cx.notify();
             });
             for c in &candidates {
@@ -889,14 +894,7 @@ impl AppView {
                 }
                 Self::load_art(&service, &c.info.key, &name, &view, cx).await;
             }
-            let _ = view.update(cx, |v: &mut Self, cx| {
-                if let Some(tile) = v.devices.tiles.first() {
-                    if matches!(tile.status, TileStatus::Idle) {
-                        let key = tile.key.clone();
-                        v.connect_tile(&key, false, cx);
-                    }
-                }
-            });
+
         })
         .detach();
     }
@@ -1352,6 +1350,18 @@ impl AppView {
         cx.notify();
     }
 
+    /// One probe at a time, including receivers; failures stay retryable
+    /// without preventing the remaining devices from being connected.
+    fn connect_next_device(&mut self, cx: &mut Context<Self>) {
+        if self.devices.tiles.iter().any(|t| matches!(t.status, TileStatus::Connecting)) { return; }
+        let next = self.devices.tiles.iter().find(|t| matches!(t.status, TileStatus::Idle)).map(|t| t.key.clone());
+        if let Some(key) = next {
+            let selected = self.devices.selected;
+            self.connect_tile(&key, false, cx);
+            self.devices.selected = selected;
+        }
+    }
+
     /// Opens one device, finds the driver that answers and reads its status.
     fn connect_tile(&mut self, key: &str, quiet: bool, cx: &mut Context<Self>) {
         let Some(index) = self.devices.tiles.iter().position(|t| t.key == key) else { return };
@@ -1400,6 +1410,7 @@ impl AppView {
                 if connected_now {
                     v.sync_running_profiles(cx);
                 }
+                v.connect_next_device(cx);
                 v.refresh_presence(cx);
                 cx.notify();
             });
