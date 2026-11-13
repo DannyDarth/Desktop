@@ -4117,6 +4117,8 @@ impl AppView {
         // Remote `img(url)` is not used: desktop GPUI ships no HTTP client
         // (`with_http_client` is web-backend-only), so URLs would stay blank.
         let art = match crate::games::cached_art_path(game) {
+            Some(path) if game.executable_path.is_some() => div().w_full().h(px(ART_H)).flex().items_center().justify_center()
+                .bg(Hsla { a: 0.06, ..accent }).child(img(path).size(px(96.)).object_fit(ObjectFit::Contain)).into_any_element(),
             Some(path) => div()
                 .w_full()
                 .h(px(ART_H))

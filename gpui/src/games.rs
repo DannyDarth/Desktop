@@ -8,6 +8,7 @@
 use serde::{Deserialize, Serialize};
 
 pub mod custom;
+pub mod executable_icon;
 mod install_scan;
 
 /// One catalog entry, mirroring the TS `Game` interface.
@@ -85,6 +86,9 @@ pub fn art_cache_dir() -> Option<std::path::PathBuf> {
 // cannot keep displaying the previously downloaded image.
 fn art_cache_path(dir: &std::path::Path, game: &Game) -> std::path::PathBuf {
     use std::hash::{Hash, Hasher};
+    if let Some(executable) = &game.executable_path {
+        return executable_icon::cache_path(dir, executable);
+    }
     match game.artwork.as_deref() {
         Some(url) => {
             let mut hash = std::collections::hash_map::DefaultHasher::new();
@@ -101,6 +105,13 @@ pub fn cached_art_path(game: &Game) -> Option<std::path::PathBuf> {
     path.is_file().then_some(path)
 }
 
+pub fn cache_executable_icon(executable: &str) {
+    if let Some(dir) = art_cache_dir() {
+        let target = executable_icon::cache_path(&dir, executable);
+        executable_icon::extract(executable, &target);
+    }
+}
+
 /// Download missing art for all games with a resolvable URL. Blocking;
 /// callers must run this off the UI thread. Uses the system `curl`
 /// (dependency-free) with a per-file timeout; failures are skipped, leaving
@@ -108,6 +119,12 @@ pub fn cached_art_path(game: &Game) -> Option<std::path::PathBuf> {
 pub fn prefetch_art(games: &[Game]) {
     let Some(dir) = art_cache_dir() else { return };
     let _ = std::fs::create_dir_all(&dir);
+    // Personal executable icons are local and should not wait on cover downloads.
+    for game in games {
+        if let Some(executable) = &game.executable_path {
+            cache_executable_icon(executable);
+        }
+    }
     for game in games {
         let Some(url) = game.art_url() else { continue };
         let target = art_cache_path(&dir, game);

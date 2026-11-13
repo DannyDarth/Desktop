@@ -178,8 +178,7 @@ again reopens its existing set instead of creating a duplicate. Entries survive
 restarts and future portable/installer updates; they remain separate from the
 bundled catalog. If a game is moved to another folder, add its new executable
 path. Choose the game's executable rather than Steam, another launcher, or a
-`.lnk` shortcut. Game artwork lookup is deferred; personal entries use the
-existing name-initial placeholder for now.
+`.lnk` shortcut. Personal entries use their executable icon, with a name-initial placeholder if extraction is unavailable. Online cover artwork lookup is deferred.
 
 ## Macro profile notifications
 
@@ -194,3 +193,13 @@ that triggers are off. The existing game-notification switch in Settings
 controls these popups too. Profile notices are silent. Native desktop overlays
 may not appear above a game's exclusive-fullscreen presentation; borderless
 windowed mode allows normal desktop overlays.
+
+
+## Executable profile images (Windows)
+
+Added games use the icon associated with their `.exe` on Games and in the macro
+profile picker. Existing personal entries get icons on startup too. Extraction
+runs in the background without launching the game; cached PNGs avoid repeating
+it on every visit. Updating the executable changes the icon cache key. Icons
+are shown contained rather than stretched into cover artwork. If a file has no
+readable icon, its existing name-initial placeholder remains available.

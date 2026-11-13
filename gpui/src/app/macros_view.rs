@@ -262,17 +262,27 @@ impl AppView {
                     .any(|m| m.game_id.as_deref() == Some(&g.id))
         }) {
             let id = game.id.clone();
-            scopes = scopes.child(self.chip(
-                format!("macro-game-{id}"),
-                game.name.clone(),
-                scope.as_deref() == Some(&id),
-                cx,
-                move |this, cx| {
-                    this.macro_scope = Some(id.clone());
-                    this.macro_selected = None;
-                    cx.notify();
-                },
-            ));
+            let mut chip = self
+                .chip(
+                    format!("macro-game-{id}"),
+                    game.name.clone(),
+                    scope.as_deref() == Some(&id),
+                    cx,
+                    move |this, cx| {
+                        this.macro_scope = Some(id.clone());
+                        this.macro_selected = None;
+                        cx.notify();
+                    },
+                )
+                .flex()
+                .items_center()
+                .gap_2();
+            if game.executable_path.is_some() {
+                if let Some(path) = games::cached_art_path(game) {
+                    chip = chip.child(img(path).size(px(20.)).object_fit(ObjectFit::Contain));
+                }
+            }
+            scopes = scopes.child(chip);
         }
         let mut activation = div().flex().flex_col().gap_2();
         if let Some(game_id) = scope.clone() {

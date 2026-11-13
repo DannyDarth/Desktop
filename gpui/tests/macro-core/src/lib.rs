@@ -52,3 +52,6 @@ mod tests {
 
 #[path = "../../../src/games/custom.rs"]
 pub mod custom_games;
+
+#[path = "../../../src/games/executable_icon.rs"]
+pub mod executable_icon;

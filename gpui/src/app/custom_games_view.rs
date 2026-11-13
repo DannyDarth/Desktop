@@ -26,7 +26,11 @@ impl AppView {
             };
             let result = cx
                 .background_executor()
-                .spawn(async move { crate::games::custom::add(&path) })
+                .spawn(async move {
+                    let added = crate::games::custom::add(&path)?;
+                    games::cache_executable_icon(&added.path);
+                    Ok::<_, String>(added)
+                })
                 .await;
             let _ = view.update(cx, |v, cx| match result {
                 Ok(added) => {

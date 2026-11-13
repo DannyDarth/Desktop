@@ -113,12 +113,13 @@ fn main() {
         {
             let view_weak = view.downgrade();
             cx.spawn(async move |cx| {
-                cx.background_executor()
-                    .spawn(async {
-                        let games = openmouse_gpui::games::load_catalog();
-                        openmouse_gpui::games::prefetch_art(&games);
-                    })
-                    .await;
+                let games = cx.background_executor().spawn(async {
+                    let games = openmouse_gpui::games::load_catalog();
+                    for game in &games { if let Some(path) = &game.executable_path { openmouse_gpui::games::cache_executable_icon(path); } }
+                    games
+                }).await;
+                let _ = view_weak.update(cx, |_, cx| cx.notify());
+                cx.background_executor().spawn(async move { openmouse_gpui::games::prefetch_art(&games); }).await;
                 let _ = view_weak.update(cx, |_, cx| {
                     cx.notify();
                 });
