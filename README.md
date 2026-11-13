@@ -72,7 +72,9 @@ Switching games stops playback and cancels an unfinished recording.
 switch. Playback
 releases every input it pressed on cancellation or error. One sequence plays at
 a time; triggers during playback are ignored. A sequence has at most 1,000 events,
-100 repeats, 60 seconds per delay and ten minutes total playback time.
+100 counted repeats, 60 seconds per delay and ten minutes per configured pass
+(or per complete counted playback). Hold and toggle types continue until their
+activation input or Stop/Escape ends them.
 
 This first version uses ordinary Windows keyboard and mouse input, so a G915 X
 can trigger keys/shortcuts and a G903 can trigger standard Windows mouse
@@ -104,3 +106,32 @@ Pull-request builds now produce the portable artifact by default. To package an
 installer from the same code, manually run **Build (Windows)** on the desired
 branch with **Also build the Windows installer** enabled. Tagged release
 packaging remains available through the existing release workflow.
+
+
+## Macro types
+
+Choose a type in the macro editor:
+
+| Type | Activation behavior |
+| --- | --- |
+| No repeat | Plays the recording once per activation press. |
+| Repeat while holding | Repeats until the activation input is released. |
+| Toggle | Repeats until the same activation input is pressed again. |
+| Sequence | Runs On press once, repeats While held, then runs On release once. |
+
+For Sequence, select **On press**, **While held** or **On release** before
+recording or dragging events. Each section saves separately. Playback validates
+that repeated sections return to their starting held-key state and that On
+release releases keys held by On press. A section can be empty.
+
+**Play once** previews one pass of a macro (all three sections for Sequence).
+To test repeat/hold/toggle behavior, enable automatic triggers and activate the
+macro in another app, such as Notepad. Automatic triggers are suspended while
+OpenMouse itself is the foreground window, so bindings such as Left click do
+not fire while editing the app.
+
+Old macros without a type retain their saved repeat counts until you choose one
+of the four types. Existing recordings and bindings are preserved. Physical
+keyboard/mouse monitoring ignores injected output, preventing a macro from
+stopping or retriggering itself. Escape, Stop, and game/profile changes cancel
+playback and release injected held inputs.

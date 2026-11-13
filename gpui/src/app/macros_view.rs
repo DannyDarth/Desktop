@@ -1,11 +1,12 @@
 use super::*;
-use crate::macros::{Macro, Trigger};
+use crate::macros::{Macro, MacroMode, Section, Trigger};
 
 #[derive(Clone)]
 struct MacroStepDrag {
     owner: EntityId,
     macro_index: usize,
     from: usize,
+    section: Section,
     steps: std::sync::Arc<[crate::macros::Step]>,
     label: String,
 }
@@ -28,6 +29,7 @@ impl AppView {
         &self,
         macro_index: usize,
         gap: usize,
+        section: Section,
         len: usize,
         busy: bool,
         cx: &mut Context<Self>,
@@ -42,6 +44,7 @@ impl AppView {
                     && any.downcast_ref::<MacroStepDrag>().is_some_and(|drag| {
                         drag.owner == owner
                             && drag.macro_index == macro_index
+                            && drag.section == section
                             && crate::macros::drop_target(drag.from, gap, len).is_some()
                     })
             })
@@ -49,6 +52,7 @@ impl AppView {
                 if !busy
                     && drag.owner == owner
                     && drag.macro_index == macro_index
+                    && drag.section == section
                     && crate::macros::drop_target(drag.from, gap, len).is_some()
                 {
                     style.bg(cx.theme().primary)
@@ -57,7 +61,11 @@ impl AppView {
                 }
             })
             .on_drop(cx.listener(move |this, drag: &MacroStepDrag, _, cx| {
-                if busy || drag.owner != cx.entity_id() || drag.macro_index != macro_index {
+                if busy
+                    || drag.owner != cx.entity_id()
+                    || drag.macro_index != macro_index
+                    || drag.section != section
+                {
                     return;
                 }
                 let state = this.macro_engine.snapshot();
@@ -67,11 +75,14 @@ impl AppView {
                 let Some(m) = state.library.macros.get(macro_index) else {
                     return;
                 };
-                if m.steps.as_slice() != drag.steps.as_ref() {
+                if m.section(section) != drag.steps.as_ref() {
                     return;
                 }
-                if let Some(to) = crate::macros::drop_target(drag.from, gap, m.steps.len()) {
-                    this.macro_engine.move_step(macro_index, drag.from, to);
+                if let Some(to) =
+                    crate::macros::drop_target(drag.from, gap, m.section(section).len())
+                {
+                    this.macro_engine
+                        .move_section_step(macro_index, section, drag.from, to);
                     cx.notify();
                 }
             }))
@@ -148,12 +159,13 @@ impl AppView {
                     if state.recording == Some(i) {
                         state.recorded_steps.len()
                     } else {
-                        m.steps.len()
+                        m.event_count()
                     }
                 ),
                 selected == Some(i),
                 cx,
                 move |this, cx| {
+                    this.macro_engine.select_section(Section::Repeat);
                     this.macro_selected = Some(i);
                     cx.notify();
                 },
@@ -165,6 +177,12 @@ impl AppView {
         let mut editor = div().flex().flex_col().gap_3();
         if let Some(i) = selected {
             let m = &state.library.macros[i];
+            let section = if m.mode == MacroMode::Sequence {
+                state.section
+            } else {
+                Section::Repeat
+            };
+            let steps = m.section(section);
             let playback_error = state.library.playback_error(i);
             editor = editor
                 .child(
@@ -192,11 +210,11 @@ impl AppView {
                         )
                         .child(
                             Button::new("macro-play")
-                                .label("Play")
+                                .label("Play once")
                                 .disabled(
                                     !cfg!(windows)
                                         || busy
-                                        || m.steps.is_empty()
+                                        || m.event_count() == 0
                                         || playback_error.is_some()
                                         || scope != state.active_game,
                                 )
@@ -249,35 +267,96 @@ impl AppView {
                         .text_color(cx.theme().muted_foreground)
                         .child("Press a key, shortcut or mouse button. Escape cancels."),
                 );
-            editor = editor.child(trigger_row).child(
-                h_flex()
-                    .gap_2()
-                    .items_center()
-                    .child(
-                        Button::new("macro-repeat-less")
-                            .label("−")
-                            .disabled(busy || m.repeats <= 1)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.macro_engine.edit(|l| {
-                                    l.macros[i].repeats =
-                                        l.macros[i].repeats.saturating_sub(1).max(1)
-                                });
-                                cx.notify();
-                            })),
-                    )
-                    .child(format!("Repeat {} times", m.repeats))
-                    .child(
-                        Button::new("macro-repeat-more")
-                            .label("+")
-                            .disabled(busy || m.repeats >= 100)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.macro_engine.edit(|l| {
-                                    l.macros[i].repeats = (l.macros[i].repeats + 1).min(100)
-                                });
-                                cx.notify();
-                            })),
-                    ),
+            editor = editor.child(trigger_row);
+            let mut modes = h_flex().gap_2().flex_wrap();
+            for mode in [
+                MacroMode::NoRepeat,
+                MacroMode::WhileHeld,
+                MacroMode::Toggle,
+                MacroMode::Sequence,
+            ] {
+                modes = modes.child(self.chip(
+                    format!("macro-mode-{mode:?}"),
+                    mode.label().into(),
+                    m.mode == mode,
+                    cx,
+                    move |this, cx| {
+                        if busy {
+                            return;
+                        }
+                        this.macro_engine.edit(|l| l.macros[i].mode = mode);
+                        this.macro_engine.select_section(Section::Repeat);
+                        cx.notify();
+                    },
+                ));
+            }
+            editor = editor.child(modes);
+            let help = match m.mode {
+                MacroMode::NoRepeat => "Plays once when you press the activation input.",
+                MacroMode::WhileHeld => "Repeats while the activation input is held. Releasing it stops playback.",
+                MacroMode::Toggle => "Press the activation input to start repeating. Press it again to stop.",
+                MacroMode::Sequence => "On press plays once, While held repeats, and On release plays once when you let go.",
+                MacroMode::Count => "This existing macro uses its saved repeat count. Choose a type above to change it.",
+            };
+            editor = editor.child(
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(help),
             );
+            if m.mode == MacroMode::Count {
+                editor = editor.child(
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(
+                            Button::new("macro-repeat-less")
+                                .label("−")
+                                .disabled(busy || m.repeats <= 1)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.macro_engine.edit(|l| {
+                                        l.macros[i].repeats =
+                                            l.macros[i].repeats.saturating_sub(1).max(1)
+                                    });
+                                    cx.notify();
+                                })),
+                        )
+                        .child(format!("Repeat {} times", m.repeats))
+                        .child(
+                            Button::new("macro-repeat-more")
+                                .label("+")
+                                .disabled(busy || m.repeats >= 100)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.macro_engine.edit(|l| {
+                                        l.macros[i].repeats = (l.macros[i].repeats + 1).min(100)
+                                    });
+                                    cx.notify();
+                                })),
+                        ),
+                );
+            }
+            if m.mode == MacroMode::Sequence {
+                let mut sections = h_flex().gap_2().flex_wrap();
+                for phase in [Section::Press, Section::Repeat, Section::Release] {
+                    sections = sections.child(self.chip(
+                        format!("macro-section-{phase:?}"),
+                        format!("{} · {} events", phase.label(), m.section(phase).len()),
+                        section == phase,
+                        cx,
+                        move |this, cx| {
+                            if !busy {
+                                this.macro_engine.select_section(phase);
+                                cx.notify();
+                            }
+                        },
+                    ));
+                }
+                editor = editor.child(sections).child(
+                    div()
+                        .text_sm()
+                        .child(format!("Recording and editing: {}", section.label())),
+                );
+            }
             if let Some(error) = playback_error {
                 editor = editor.child(div().text_sm().text_color(cx.theme().danger).child(
                     format!("Order saved. Playback is paused until the order is complete: {error}"),
@@ -331,15 +410,16 @@ impl AppView {
             } else {
                 editor = editor.child(div().text_xs().text_color(cx.theme().muted_foreground)
                     .child("Drag a row to reorder it. Drop on the green line. Delays move with their events."));
-                let steps: std::sync::Arc<[crate::macros::Step]> = m.steps.clone().into();
+                let dragged_steps: std::sync::Arc<[crate::macros::Step]> = steps.to_vec().into();
                 let mut rows = div().flex().flex_col();
-                for (j, step) in m.steps.iter().enumerate() {
-                    rows = rows.child(self.macro_drop_zone(i, j, m.steps.len(), busy, cx));
+                for (j, step) in steps.iter().enumerate() {
+                    rows = rows.child(self.macro_drop_zone(i, j, section, steps.len(), busy, cx));
                     let payload = MacroStepDrag {
                         owner: cx.entity_id(),
                         macro_index: i,
                         from: j,
-                        steps: steps.clone(),
+                        section,
+                        steps: dragged_steps.clone(),
                         label: crate::macros::step_label(step),
                     };
                     rows = rows.child(
@@ -383,8 +463,10 @@ impl AppView {
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         cx.stop_propagation();
                                         this.macro_engine.edit(|l| {
-                                            l.macros[i].steps[j].delay_ms =
-                                                l.macros[i].steps[j].delay_ms.saturating_sub(10)
+                                            l.macros[i].section_mut(section)[j].delay_ms =
+                                                l.macros[i].section_mut(section)[j]
+                                                    .delay_ms
+                                                    .saturating_sub(10)
                                         });
                                         cx.notify();
                                     })),
@@ -404,15 +486,23 @@ impl AppView {
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         cx.stop_propagation();
                                         this.macro_engine.edit(|l| {
-                                            l.macros[i].steps[j].delay_ms =
-                                                (l.macros[i].steps[j].delay_ms + 10).min(60_000)
+                                            l.macros[i].section_mut(section)[j].delay_ms =
+                                                (l.macros[i].section_mut(section)[j].delay_ms + 10)
+                                                    .min(60_000)
                                         });
                                         cx.notify();
                                     })),
                             ),
                     );
                 }
-                rows = rows.child(self.macro_drop_zone(i, m.steps.len(), m.steps.len(), busy, cx));
+                rows = rows.child(self.macro_drop_zone(
+                    i,
+                    steps.len(),
+                    section,
+                    steps.len(),
+                    busy,
+                    cx,
+                ));
                 editor = editor.child(rows);
             }
         }
@@ -430,7 +520,7 @@ impl AppView {
                     .child(Button::new("macro-add").label("Add macro").disabled(busy || state.library.macros.len() >= 64).on_click(cx.listener(move |this, _, _, cx| {
                         let library = this.macro_engine.snapshot().library;
                         let trigger = (0x70..=0x7b).filter(|k| *k != 0x77).map(|key| Trigger::Shortcut { key }).chain([Trigger::Mouse { button: 4 }, Trigger::Mouse { button: 5 }]).chain((0x7c..=0x87).map(|code| Trigger::Key { code, modifiers: 0 })).chain((0x41..=0x5a).map(|code| Trigger::Key { code, modifiers: 0 })).find(|t| !library.macros.iter().any(|m| m.game_id == scope && m.trigger.same_input(t)));
-                        if let Some(trigger) = trigger { let i = library.macros.len(); this.macro_engine.edit(|l| l.macros.push(Macro { game_id: scope.clone(), name: format!("Macro {}", i + 1), trigger, repeats: 1, steps: Vec::new() })); this.macro_selected = Some(i); }
+                        if let Some(trigger) = trigger { let i = library.macros.len(); this.macro_engine.edit(|l| l.macros.push(Macro { mode: MacroMode::NoRepeat, on_press: vec![], on_release: vec![], game_id: scope.clone(), name: format!("Macro {}", i + 1), trigger, repeats: 1, steps: Vec::new() })); this.macro_selected = Some(i); }
                         cx.notify();
                     }))))
                 .child(div().text_sm().child(state.message))

@@ -68,6 +68,43 @@ impl Trigger {
         }
     }
 }
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum MacroMode {
+    NoRepeat,
+    WhileHeld,
+    Toggle,
+    Sequence,
+    #[default]
+    Count,
+}
+impl MacroMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::NoRepeat => "No repeat",
+            Self::WhileHeld => "Repeat while holding",
+            Self::Toggle => "Toggle",
+            Self::Sequence => "Sequence",
+            Self::Count => "Repeat count",
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Section {
+    Press,
+    #[default]
+    Repeat,
+    Release,
+}
+impl Section {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Press => "On press",
+            Self::Repeat => "While held",
+            Self::Release => "On release",
+        }
+    }
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Macro {
@@ -76,7 +113,72 @@ pub struct Macro {
     pub name: String,
     pub trigger: Trigger,
     pub repeats: u16,
+    #[serde(default)]
+    pub mode: MacroMode,
+    #[serde(default)]
+    pub on_press: Vec<Step>,
+    #[serde(default)]
+    pub on_release: Vec<Step>,
     pub steps: Vec<Step>,
+}
+impl Macro {
+    pub fn section(&self, section: Section) -> &[Step] {
+        match section {
+            Section::Press => &self.on_press,
+            Section::Repeat => &self.steps,
+            Section::Release => &self.on_release,
+        }
+    }
+    pub fn section_mut(&mut self, section: Section) -> &mut Vec<Step> {
+        match section {
+            Section::Press => &mut self.on_press,
+            Section::Repeat => &mut self.steps,
+            Section::Release => &mut self.on_release,
+        }
+    }
+    pub fn event_count(&self) -> usize {
+        if self.mode == MacroMode::Sequence {
+            self.on_press.len() + self.steps.len() + self.on_release.len()
+        } else {
+            self.steps.len()
+        }
+    }
+}
+fn apply_order(steps: &[Step], held: &mut HashSet<u16>) -> Result<(), String> {
+    for step in steps {
+        let (key, down) = match step.action {
+            Action::Key { code, down } => (code, down),
+            Action::Mouse { button, down } => (0x100 + u16::from(button), down),
+        };
+        if down {
+            if !held.insert(key) {
+                return Err("A key is pressed twice without a release.".into());
+            }
+        } else if !held.remove(&key) {
+            return Err("A release has no matching press.".into());
+        }
+    }
+    Ok(())
+}
+fn validate_order(m: &Macro) -> Result<(), String> {
+    let mut held = HashSet::new();
+    if m.mode == MacroMode::Sequence {
+        apply_order(&m.on_press, &mut held)?;
+        let baseline = held.clone();
+        apply_order(&m.steps, &mut held)?;
+        if held != baseline {
+            return Err(
+                "The While held section must finish with the same keys held as it started.".into(),
+            );
+        }
+        apply_order(&m.on_release, &mut held)?;
+    } else {
+        apply_order(&m.steps, &mut held)?;
+    }
+    if !held.is_empty() {
+        return Err("Every press needs a matching release before playback.".into());
+    }
+    Ok(())
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -88,16 +190,26 @@ impl Library {
     /// The delay belongs to its event and travels with it. Playback validation
     /// rejects a release before its press or overlapping duplicate presses.
     pub fn move_step(&mut self, macro_index: usize, from: usize, to: usize) -> Result<(), String> {
+        self.move_section_step(macro_index, Section::Repeat, from, to)
+    }
+    pub fn move_section_step(
+        &mut self,
+        macro_index: usize,
+        section: Section,
+        from: usize,
+        to: usize,
+    ) -> Result<(), String> {
         let mut next = self.clone();
         let m = next
             .macros
             .get_mut(macro_index)
             .ok_or("Macro no longer exists.")?;
-        if from >= m.steps.len() || to >= m.steps.len() {
+        let steps = m.section_mut(section);
+        if from >= steps.len() || to >= steps.len() {
             return Err("Step no longer exists.".into());
         }
-        let step = m.steps.remove(from);
-        m.steps.insert(to, step);
+        let step = steps.remove(from);
+        steps.insert(to, step);
         next.validate_editing()
             .map_err(|e| format!("Cannot move this step: {e}"))?;
         *self = next;
@@ -130,7 +242,7 @@ impl Library {
             if m.name.is_empty()
                 || m.name.len() > 100
                 || !(1..=100).contains(&m.repeats)
-                || m.steps.len() > 1000
+                || m.on_press.len() + m.steps.len() + m.on_release.len() > 1000
             {
                 return Err("Invalid macro name, repeat count or step count.".into());
             }
@@ -145,35 +257,29 @@ impl Library {
                 Trigger::Mouse { button: 1..=5 } => {}
                 _ => return Err("Unsupported trigger.".into()),
             }
-            let mut held = HashSet::new();
             let mut duration = 0u64;
-            for step in &m.steps {
+            for step in m.on_press.iter().chain(&m.steps).chain(&m.on_release) {
                 if step.delay_ms > 60_000 {
                     return Err("A delay cannot exceed 60 seconds.".into());
                 }
                 duration += u64::from(step.delay_ms);
-                let (key, down) = match step.action {
-                    Action::Key { code, down } if recordable_key(code) => (code, down),
-                    Action::Mouse { button, down } if (1..=5).contains(&button) => {
-                        (0x100 + u16::from(button), down)
-                    }
+                match step.action {
+                    Action::Key { code, .. } if recordable_key(code) => {}
+                    Action::Mouse { button: 1..=5, .. } => {}
                     _ => return Err("Unsupported input in macro.".into()),
-                };
-                if !check_order {
-                    continue;
-                }
-                if down {
-                    if !held.insert(key) {
-                        return Err("A key is pressed twice without a release.".into());
-                    }
-                } else if !held.remove(&key) {
-                    return Err("A release has no matching press.".into());
                 }
             }
-            if check_order && !held.is_empty() {
-                return Err("Every press needs a matching release before playback.".into());
+            if check_order {
+                validate_order(m)?;
             }
-            if duration * u64::from(m.repeats) > 600_000 {
+            if duration
+                * if m.mode == MacroMode::Count {
+                    u64::from(m.repeats)
+                } else {
+                    1
+                }
+                > 600_000
+            {
                 return Err("Playback is limited to ten minutes.".into());
             }
         }
@@ -235,6 +341,7 @@ pub struct Snapshot {
     /// Unsaved input captured by the recorder; never replaces the saved macro until F8.
     pub recorded_steps: Vec<Step>,
     pub assigning: Option<usize>,
+    pub section: Section,
     pub playing: bool,
     pub message: String,
     pub active_game: Option<String>,
@@ -272,6 +379,7 @@ impl Engine {
                     recording: None,
                     recorded_steps: Vec::new(),
                     assigning: None,
+                    section: Section::Repeat,
                     playing: false,
                     message,
                     active_game: None,
@@ -303,6 +411,15 @@ impl Engine {
             Vec::new()
         };
         snapshot
+    }
+    pub fn select_section(&self, section: Section) {
+        let mut s = self.state.lock().unwrap();
+        if !s.snapshot.playing && s.snapshot.recording.is_none() && s.snapshot.assigning.is_none() {
+            s.snapshot.section = section;
+        }
+    }
+    pub fn move_section_step(&self, index: usize, section: Section, from: usize, to: usize) {
+        self.update(|library| library.move_section_step(index, section, from, to));
     }
     pub fn edit(&self, change: impl FnOnce(&mut Library)) {
         self.update(|library| {
@@ -405,7 +522,7 @@ impl Engine {
 
     pub fn play(&self, index: usize) {
         #[cfg(windows)]
-        windows::play(&self.state, &self.cancel, index);
+        windows::play(&self.state, &self.cancel, index, false);
         #[cfg(not(windows))]
         {
             let _ = index;
@@ -453,6 +570,25 @@ fn persist(path: Option<&std::path::Path>, library: &Library) -> Result<(), Stri
     Ok(())
 }
 
+/// Whether another full cycle should run after the current one.
+pub fn repeat_cycle(
+    mode: MacroMode,
+    triggered: bool,
+    held: bool,
+    pressed_again: bool,
+    completed: u32,
+    count: u16,
+) -> bool {
+    if !triggered {
+        return mode == MacroMode::Count && completed < u32::from(count);
+    }
+    match mode {
+        MacroMode::NoRepeat => false,
+        MacroMode::Count => completed < u32::from(count),
+        MacroMode::WhileHeld | MacroMode::Sequence => held,
+        MacroMode::Toggle => !pressed_again,
+    }
+}
 /// Translate an insertion gap (including the trailing gap) into the final index.
 pub fn drop_target(from: usize, gap: usize, len: usize) -> Option<usize> {
     if from >= len || gap > len {
@@ -468,6 +604,9 @@ mod tests {
         Library {
             enabled: false,
             macros: vec![Macro {
+                mode: MacroMode::Count,
+                on_press: vec![],
+                on_release: vec![],
                 game_id: None,
                 name: "Test".into(),
                 trigger: Trigger::Shortcut { key: 0x75 },
@@ -532,6 +671,7 @@ mod tests {
                     recording: Some(0),
                     recorded_steps: Vec::new(),
                     assigning: None,
+                    section: Section::Repeat,
                     playing: true,
                     message: String::new(),
                     active_game: Some("one".into()),
@@ -693,5 +833,79 @@ mod tests {
         };
         l.macros.push(other);
         assert!(l.validate().is_err());
+    }
+    #[test]
+    fn all_four_types_have_distinct_repeat_behavior() {
+        assert!(!repeat_cycle(MacroMode::NoRepeat, true, true, false, 1, 50));
+        assert!(repeat_cycle(MacroMode::WhileHeld, true, true, false, 1, 1));
+        assert!(!repeat_cycle(
+            MacroMode::WhileHeld,
+            true,
+            false,
+            false,
+            1,
+            1
+        ));
+        assert!(repeat_cycle(MacroMode::Toggle, true, false, false, 1000, 1));
+        assert!(!repeat_cycle(MacroMode::Toggle, true, true, true, 1, 1));
+        assert!(repeat_cycle(MacroMode::Sequence, true, true, false, 1, 1));
+        assert!(!repeat_cycle(MacroMode::Sequence, true, false, false, 1, 1));
+        for mode in [
+            MacroMode::NoRepeat,
+            MacroMode::WhileHeld,
+            MacroMode::Toggle,
+            MacroMode::Sequence,
+        ] {
+            assert!(!repeat_cycle(mode, false, true, false, 1, 1));
+        }
+    }
+    #[test]
+    fn sequence_can_hold_a_key_across_press_and_release() {
+        let mut l = library(vec![]);
+        let m = &mut l.macros[0];
+        m.mode = MacroMode::Sequence;
+        m.on_press = vec![key(true)];
+        m.on_release = vec![key(false)];
+        m.steps = vec![
+            Step {
+                delay_ms: 10,
+                action: Action::Key {
+                    code: 0x42,
+                    down: true,
+                },
+            },
+            Step {
+                delay_ms: 10,
+                action: Action::Key {
+                    code: 0x42,
+                    down: false,
+                },
+            },
+        ];
+        assert!(l.validate().is_ok());
+        l.macros[0].steps.pop();
+        assert!(l.validate().is_err());
+        assert!(l.validate_editing().is_ok());
+    }
+    #[test]
+    fn existing_recordings_keep_their_repeat_count() {
+        let old = r#"{"enabled":false,"macros":[{"name":"Existing","trigger":{"kind":"shortcut","key":117},"repeats":3,"steps":[]}]}"#;
+        let l: Library = serde_json::from_str(old).unwrap();
+        assert_eq!(l.macros[0].mode, MacroMode::Count);
+        assert_eq!(l.macros[0].repeats, 3);
+        assert!(repeat_cycle(l.macros[0].mode, true, false, false, 2, 3));
+        assert!(!repeat_cycle(l.macros[0].mode, true, false, false, 3, 3));
+    }
+    #[test]
+    fn sequence_sections_survive_save_and_reorder_independently() {
+        let mut l = library(vec![key(true), key(false)]);
+        l.macros[0].mode = MacroMode::Sequence;
+        l.macros[0].on_press = vec![key(true), key(false)];
+        l.move_section_step(0, Section::Press, 0, 1).unwrap();
+        assert_eq!(l.macros[0].steps[0].action, key(true).action);
+        let reopened: Library = serde_json::from_str(&serde_json::to_string(&l).unwrap()).unwrap();
+        assert_eq!(reopened.macros[0].mode, MacroMode::Sequence);
+        assert_eq!(reopened.macros[0].on_press[0].action, key(false).action);
+        assert!(reopened.playback_error(0).is_some());
     }
 }

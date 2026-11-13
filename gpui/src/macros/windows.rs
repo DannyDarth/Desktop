@@ -1,5 +1,6 @@
 //! Native Windows input sampling and playback. The worker never samples injected
 //! events during playback, and releases its held inputs on every exit path.
+mod physical;
 use super::*;
 use std::{
     collections::HashSet,
@@ -40,6 +41,8 @@ struct Input {
 #[link(name = "user32")]
 extern "system" {
     fn GetAsyncKeyState(key: i32) -> i16;
+    fn GetForegroundWindow() -> isize;
+    fn GetWindowThreadProcessId(window: isize, process: *mut u32) -> u32;
     fn SendInput(count: u32, inputs: *const Input, size: i32) -> u32;
     fn MapVirtualKeyW(code: u32, kind: u32) -> u32;
 }
@@ -57,7 +60,11 @@ pub(super) fn replace_file(from: &std::path::Path, to: &std::path::Path) -> Resu
     Ok(())
 }
 fn down(key: u16) -> bool {
-    unsafe { GetAsyncKeyState(i32::from(key)) < 0 }
+    if physical::ready() && key != 0x1b {
+        physical::down(key)
+    } else {
+        unsafe { GetAsyncKeyState(i32::from(key)) < 0 }
+    }
 }
 fn action(code: u16, pressed: bool) -> Action {
     match code {
@@ -212,7 +219,88 @@ fn wait(ms: u32, cancel: &AtomicBool) -> bool {
     }
     !is_cancelled(cancel)
 }
-pub(super) fn play(state: &Arc<Mutex<State>>, cancel: &Arc<AtomicBool>, index: usize) {
+#[link(name = "kernel32")]
+extern "system" {
+    fn GetCurrentProcessId() -> u32;
+}
+fn editor_is_foreground() -> bool {
+    let mut pid = 0;
+    unsafe {
+        GetWindowThreadProcessId(GetForegroundWindow(), &mut pid);
+        pid == GetCurrentProcessId()
+    }
+}
+fn activations(trigger: &Trigger) -> u64 {
+    match *trigger {
+        Trigger::Key { code, modifiers } => physical::activations(code, Some(modifiers)),
+        Trigger::Shortcut { key } => physical::activations(key, Some(5)),
+        Trigger::Mouse { button } => physical::activations(
+            match button {
+                1 => 1,
+                2 => 2,
+                3 => 4,
+                4 => 5,
+                _ => 6,
+            },
+            None,
+        ),
+    }
+}
+struct PlaybackControl {
+    cancel: Arc<AtomicBool>,
+    trigger: Trigger,
+    mode: MacroMode,
+    triggered: bool,
+    initial: u64,
+}
+impl PlaybackControl {
+    fn interrupted(&self, section: Section) -> bool {
+        if is_cancelled(&self.cancel) {
+            return true;
+        }
+        if !self.triggered {
+            return false;
+        }
+        match self.mode {
+            MacroMode::Toggle => activations(&self.trigger) > self.initial,
+            MacroMode::WhileHeld => !trigger_down(&self.trigger),
+            MacroMode::Sequence if section == Section::Repeat => !trigger_down(&self.trigger),
+            _ => false,
+        }
+    }
+}
+fn run_steps(
+    steps: &[Step],
+    section: Section,
+    control: &PlaybackControl,
+    held: &mut Vec<Action>,
+) -> Result<bool, String> {
+    for step in steps {
+        let end = Instant::now() + Duration::from_millis(u64::from(step.delay_ms));
+        while Instant::now() < end {
+            if control.interrupted(section) {
+                return Ok(false);
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        if control.interrupted(section) {
+            return Ok(false);
+        }
+        send(&step.action)?;
+        if pressed(&step.action) {
+            held.push(step.action.clone());
+        } else {
+            held.retain(|a| released(a) != step.action);
+        }
+    }
+    Ok(true)
+}
+pub(super) fn play(
+    state: &Arc<Mutex<State>>,
+    cancel: &Arc<AtomicBool>,
+    index: usize,
+    triggered: bool,
+) {
     let mut s = state.lock().unwrap();
     if s.snapshot.playing || s.snapshot.recording.is_some() || s.snapshot.assigning.is_some() {
         return;
@@ -220,53 +308,120 @@ pub(super) fn play(state: &Arc<Mutex<State>>, cancel: &Arc<AtomicBool>, index: u
     let Some(m) = s.snapshot.library.macros.get(index).cloned() else {
         return;
     };
-    if m.steps.is_empty() || m.game_id != s.snapshot.active_game {
-        s.snapshot.message = "This macro is not in the active game set.".into();
+    if m.event_count() == 0 || m.game_id != s.snapshot.active_game {
+        s.snapshot.message = "This macro is empty or not in the active game set.".into();
         return;
     }
     if let Some(e) = s.snapshot.library.playback_error(index) {
         s.snapshot.message = e;
         return;
     }
+    if triggered
+        && !physical::ready()
+        && matches!(
+            m.mode,
+            MacroMode::Toggle | MacroMode::WhileHeld | MacroMode::Sequence
+        )
+    {
+        s.snapshot.message = "Physical input monitoring is unavailable. Restart OpenMouse before using this macro type.".into();
+        return;
+    }
     s.snapshot.playing = true;
     s.snapshot.message = format!("Playing {}. Escape stops playback.", m.name);
     cancel.store(false, Ordering::SeqCst);
+    let control = PlaybackControl {
+        cancel: cancel.clone(),
+        trigger: m.trigger.clone(),
+        mode: m.mode,
+        triggered,
+        initial: activations(&m.trigger),
+    };
     let state = state.clone();
-    let cancel = cancel.clone();
     std::thread::spawn(move || {
         let mut held: Vec<Action> = Vec::new();
-        let mut error = None;
-        // Let the triggering shortcut and mouse click finish before injecting.
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while !sample().is_empty() && !is_cancelled(&cancel) && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(4));
-        }
-        if !sample().is_empty() {
-            cancel.store(true, Ordering::SeqCst);
-        }
-        'playback: for _ in 0..m.repeats {
-            for step in &m.steps {
-                if !wait(step.delay_ms, &cancel) {
-                    break 'playback;
+        let outcome = (|| -> Result<(), String> {
+            if !triggered {
+                // The preview button must be released before injecting input.
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while !sample().is_empty()
+                    && !is_cancelled(&control.cancel)
+                    && Instant::now() < deadline
+                {
+                    std::thread::sleep(Duration::from_millis(2));
                 }
-                if let Err(e) = send(&step.action) {
-                    error = Some(e);
-                    break 'playback;
-                }
-                if pressed(&step.action) {
-                    held.push(step.action.clone());
-                } else {
-                    held.retain(|a| released(a) != step.action);
+                if !sample().is_empty() {
+                    return Ok(());
                 }
             }
-        }
+            if m.mode == MacroMode::Sequence {
+                if !run_steps(&m.on_press, Section::Press, &control, &mut held)? {
+                    return Ok(());
+                }
+                if !triggered {
+                    run_steps(&m.steps, Section::Repeat, &control, &mut held)?;
+                } else {
+                    while trigger_down(&m.trigger) && !is_cancelled(&control.cancel) {
+                        let baseline = held.clone();
+                        if !run_steps(&m.steps, Section::Repeat, &control, &mut held)? {
+                            if !is_cancelled(&control.cancel) {
+                                let extras: Vec<_> = held
+                                    .iter()
+                                    .filter(|a| !baseline.contains(a))
+                                    .cloned()
+                                    .collect();
+                                for a in extras {
+                                    send(&released(&a))?;
+                                    held.retain(|h| *h != a);
+                                }
+                                for a in baseline {
+                                    if !held.contains(&a) {
+                                        send(&a)?;
+                                        held.push(a);
+                                    }
+                                }
+                            }
+                            break;
+                        }
+                        if !wait(8, &control.cancel) {
+                            break;
+                        }
+                    }
+                }
+                if !is_cancelled(&control.cancel) {
+                    run_steps(&m.on_release, Section::Release, &control, &mut held)?;
+                }
+            } else {
+                let mut cycles = 0;
+                loop {
+                    if !run_steps(&m.steps, Section::Repeat, &control, &mut held)? {
+                        break;
+                    }
+                    cycles += 1;
+                    if !repeat_cycle(
+                        m.mode,
+                        triggered,
+                        trigger_down(&m.trigger),
+                        activations(&m.trigger) > control.initial,
+                        cycles,
+                        m.repeats,
+                    ) {
+                        break;
+                    }
+                    // A zero-delay recording must not spin at unlimited speed.
+                    if !wait(8, &control.cancel) {
+                        break;
+                    }
+                }
+            }
+            Ok(())
+        })();
         for a in held.iter().rev() {
             let _ = send(&released(a));
         }
         let mut s = state.lock().unwrap();
         s.snapshot.playing = false;
-        s.snapshot.message = error.unwrap_or_else(|| {
-            if is_cancelled(&cancel) {
+        s.snapshot.message = outcome.err().unwrap_or_else(|| {
+            if is_cancelled(&control.cancel) {
                 "Playback stopped".into()
             } else {
                 "Playback finished".into()
@@ -275,6 +430,7 @@ pub(super) fn play(state: &Arc<Mutex<State>>, cancel: &Arc<AtomicBool>, index: u
     });
 }
 pub(super) fn start(weak: Weak<Mutex<State>>, cancel: Arc<AtomicBool>, path: Option<PathBuf>) {
+    physical::start(weak.clone());
     std::thread::spawn(move || {
         let mut previous = sample();
         let mut last = Instant::now();
@@ -395,11 +551,15 @@ pub(super) fn start(weak: Weak<Mutex<State>>, cancel: Arc<AtomicBool>, path: Opt
                     let draft = std::mem::take(&mut s.draft);
                     let mut next = s.snapshot.library.clone();
                     if let Some(m) = next.macros.get_mut(index) {
-                        m.steps = draft;
+                        let section = if m.mode == MacroMode::Sequence {
+                            s.snapshot.section
+                        } else {
+                            Section::Repeat
+                        };
+                        *m.section_mut(section) = draft;
                     }
                     match next
                         .validate_editing()
-                        .and_then(|_| next.playback_error(index).map_or(Ok(()), Err))
                         .and_then(|_| persist(path.as_deref(), &next))
                     {
                         Ok(()) => {
@@ -440,7 +600,7 @@ pub(super) fn start(weak: Weak<Mutex<State>>, cancel: Arc<AtomicBool>, path: Opt
                 recording = None;
                 let mut active = HashSet::new();
                 let mut chosen = None;
-                if s.snapshot.library.enabled {
+                if s.snapshot.library.enabled && !editor_is_foreground() {
                     for (i, m) in s
                         .snapshot
                         .library
@@ -461,7 +621,7 @@ pub(super) fn start(weak: Weak<Mutex<State>>, cancel: Arc<AtomicBool>, path: Opt
                 triggers = active;
                 if let Some(index) = chosen {
                     drop(s);
-                    play(&state, &cancel, index);
+                    play(&state, &cancel, index, true);
                     previous = now;
                     continue;
                 }
