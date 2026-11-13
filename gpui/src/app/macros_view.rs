@@ -1,7 +1,82 @@
 use super::*;
 use crate::macros::{Macro, Trigger};
 
+#[derive(Clone)]
+struct MacroStepDrag {
+    owner: EntityId,
+    macro_index: usize,
+    from: usize,
+    steps: std::sync::Arc<[crate::macros::Step]>,
+    label: String,
+}
+impl Render for MacroStepDrag {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px_3()
+            .py_2()
+            .bg(cx.theme().sidebar)
+            .text_color(cx.theme().foreground)
+            .border_1()
+            .border_color(cx.theme().primary)
+            .rounded(cx.theme().radius)
+            .child(self.label.clone())
+    }
+}
+
 impl AppView {
+    fn macro_drop_zone(
+        &self,
+        macro_index: usize,
+        gap: usize,
+        len: usize,
+        busy: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let owner = cx.entity_id();
+        div()
+            .id(SharedString::from(format!("macro-gap-{macro_index}-{gap}")))
+            .w_full()
+            .h(px(10.))
+            .can_drop(move |any, _, _| {
+                !busy
+                    && any.downcast_ref::<MacroStepDrag>().is_some_and(|drag| {
+                        drag.owner == owner
+                            && drag.macro_index == macro_index
+                            && crate::macros::drop_target(drag.from, gap, len).is_some()
+                    })
+            })
+            .drag_over::<MacroStepDrag>(move |style, drag, _, cx| {
+                if !busy
+                    && drag.owner == owner
+                    && drag.macro_index == macro_index
+                    && crate::macros::drop_target(drag.from, gap, len).is_some()
+                {
+                    style.bg(cx.theme().primary)
+                } else {
+                    style
+                }
+            })
+            .on_drop(cx.listener(move |this, drag: &MacroStepDrag, _, cx| {
+                if busy || drag.owner != cx.entity_id() || drag.macro_index != macro_index {
+                    return;
+                }
+                let state = this.macro_engine.snapshot();
+                if state.playing || state.recording.is_some() || state.assigning.is_some() {
+                    return;
+                }
+                let Some(m) = state.library.macros.get(macro_index) else {
+                    return;
+                };
+                if m.steps.as_slice() != drag.steps.as_ref() {
+                    return;
+                }
+                if let Some(to) = crate::macros::drop_target(drag.from, gap, m.steps.len()) {
+                    this.macro_engine.move_step(macro_index, drag.from, to);
+                    cx.notify();
+                }
+            }))
+            .into_any_element()
+    }
     pub(super) fn render_macros(&self, cx: &mut Context<Self>) -> AnyElement {
         let state = self.macro_engine.snapshot();
         let scope = self.macro_scope.clone();
@@ -14,7 +89,7 @@ impl AppView {
             .as_deref()
             .map(|id| self.game_name(id))
             .unwrap_or_else(|| "Default".into());
-        let busy = state.playing || state.recording.is_some();
+        let busy = state.playing || state.recording.is_some() || state.assigning.is_some();
         let selected = self.macro_selected.filter(|i| {
             state
                 .library
@@ -109,9 +184,7 @@ impl AppView {
                                 } else {
                                     "Record input"
                                 })
-                                .disabled(
-                                    !cfg!(windows) || state.playing || state.recording.is_some(),
-                                )
+                                .disabled(!cfg!(windows) || busy)
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.macro_engine.record(i);
                                     cx.notify();
@@ -145,32 +218,37 @@ impl AppView {
                                 })),
                         ),
                 )
-                .child(div().text_sm().child("Trigger (click to change):"));
-            let mut trigger_row = h_flex().gap_2().flex_wrap();
-            let triggers = (0x70..=0x7b)
-                .filter(|k| *k != 0x77)
-                .map(|key| Trigger::Shortcut { key })
-                .chain([Trigger::Mouse { button: 4 }, Trigger::Mouse { button: 5 }]);
-            for (n, trigger) in triggers.enumerate() {
-                let assigned =
-                    state.library.macros.iter().enumerate().any(|(j, other)| {
-                        i != j && other.game_id == scope && other.trigger == trigger
-                    });
-                if assigned || busy {
-                    continue;
-                }
-                trigger_row = trigger_row.child(self.chip(
-                    format!("macro-trigger-{n}"),
-                    trigger.label(),
-                    m.trigger == trigger,
-                    cx,
-                    move |this, cx| {
-                        this.macro_engine
-                            .edit(|l| l.macros[i].trigger = trigger.clone());
-                        cx.notify();
-                    },
-                ));
-            }
+                .child(div().text_sm().child("Activation"));
+            let trigger_row = h_flex()
+                .gap_3()
+                .items_center()
+                .flex_wrap()
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(FontWeight::MEDIUM)
+                        .child(m.trigger.label()),
+                )
+                .child(
+                    Button::new("macro-assign-trigger")
+                        .compact()
+                        .label(if state.assigning == Some(i) {
+                            "Waiting for input…"
+                        } else {
+                            "Assign input"
+                        })
+                        .disabled(!cfg!(windows) || busy)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.macro_engine.assign_trigger(i);
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("Press a key, shortcut or mouse button. Escape cancels."),
+                );
             editor = editor.child(trigger_row).child(
                 h_flex()
                     .gap_2()
@@ -252,43 +330,58 @@ impl AppView {
                 editor = editor.child(live);
             } else {
                 editor = editor.child(div().text_xs().text_color(cx.theme().muted_foreground)
-                    .child("Move any keyboard or mouse event freely. Delays move with their events. Complete the press/release order to enable playback."));
+                    .child("Drag a row to reorder it. Drop on the green line. Delays move with their events."));
+                let steps: std::sync::Arc<[crate::macros::Step]> = m.steps.clone().into();
+                let mut rows = div().flex().flex_col();
                 for (j, step) in m.steps.iter().enumerate() {
-                    let last = m.steps.len() - 1;
-                    let mut moves = h_flex().gap_1().flex_wrap();
-                    for (action, label, target) in [
-                        ("first", "To start", 0),
-                        ("up", "Up", j.saturating_sub(1)),
-                        ("down", "Down", (j + 1).min(last)),
-                        ("last", "To end", last),
-                    ] {
-                        moves = moves.child(
-                            Button::new(SharedString::from(format!("macro-move-{action}-{j}")))
-                                .compact()
-                                .label(label)
-                                .disabled(busy || target == j)
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.macro_engine.move_step(i, j, target);
-                                    cx.notify();
-                                })),
-                        );
-                    }
-                    editor = editor.child(
+                    rows = rows.child(self.macro_drop_zone(i, j, m.steps.len(), busy, cx));
+                    let payload = MacroStepDrag {
+                        owner: cx.entity_id(),
+                        macro_index: i,
+                        from: j,
+                        steps: steps.clone(),
+                        label: crate::macros::step_label(step),
+                    };
+                    rows = rows.child(
                         h_flex()
-                            .gap_2()
+                            .id(SharedString::from(format!("macro-event-{j}")))
+                            .gap_3()
                             .items_center()
-                            .flex_wrap()
-                            .child(div().min_w(px(220.)).text_sm().child(format!(
-                                "{}. {}",
-                                j + 1,
-                                crate::macros::step_label(step)
-                            )))
-                            .child(moves)
+                            .px_3()
+                            .py_2()
+                            .w_full()
+                            .border_1()
+                            .border_color(cx.theme().border)
+                            .rounded(cx.theme().radius)
+                            .when(!busy, |row| {
+                                row.cursor_grab().on_drag(payload, |drag, _, _, cx| {
+                                    cx.stop_propagation();
+                                    cx.new(|_| drag.clone())
+                                })
+                            })
+                            .child(div().text_color(cx.theme().muted_foreground).child("⠿"))
+                            .child(
+                                div()
+                                    .w(px(28.))
+                                    .text_sm()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(format!("{}", j + 1)),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_sm()
+                                    .child(crate::macros::step_label(step)),
+                            )
                             .child(
                                 Button::new(SharedString::from(format!("macro-delay-less-{j}")))
-                                    .label("−10 ms")
+                                    .compact()
+                                    .label("−")
+                                    .tooltip("Reduce delay by 10 ms")
                                     .disabled(busy || step.delay_ms == 0)
                                     .on_click(cx.listener(move |this, _, _, cx| {
+                                        cx.stop_propagation();
                                         this.macro_engine.edit(|l| {
                                             l.macros[i].steps[j].delay_ms =
                                                 l.macros[i].steps[j].delay_ms.saturating_sub(10)
@@ -296,12 +389,20 @@ impl AppView {
                                         cx.notify();
                                     })),
                             )
-                            .child(format!("{} ms", step.delay_ms))
+                            .child(
+                                div()
+                                    .w(px(75.))
+                                    .text_sm()
+                                    .child(format!("{} ms", step.delay_ms)),
+                            )
                             .child(
                                 Button::new(SharedString::from(format!("macro-delay-more-{j}")))
-                                    .label("+10 ms")
+                                    .compact()
+                                    .label("+")
+                                    .tooltip("Increase delay by 10 ms")
                                     .disabled(busy || step.delay_ms >= 60_000)
                                     .on_click(cx.listener(move |this, _, _, cx| {
+                                        cx.stop_propagation();
                                         this.macro_engine.edit(|l| {
                                             l.macros[i].steps[j].delay_ms =
                                                 (l.macros[i].steps[j].delay_ms + 10).min(60_000)
@@ -311,14 +412,16 @@ impl AppView {
                             ),
                     );
                 }
+                rows = rows.child(self.macro_drop_zone(i, m.steps.len(), m.steps.len(), busy, cx));
+                editor = editor.child(rows);
             }
         }
         div().id("macros-page").size_full().overflow_y_scroll().p(px(PAGE_PAD)).child(
             div().flex().flex_col().gap_4().max_w(px(1000.))
                 .child(div().text_xl().font_weight(FontWeight::SEMIBOLD).child("Macros"))
                 .child(div().text_sm().child(format!("Active set: {active_name}. Editing: {scope_name}.")))
-                .child(div().text_sm().text_color(cx.theme().muted_foreground).child("Opening a detected game switches its macro set and this editor. Closing it restores another running game's set, or Default. The newest detected game wins when several run. Open any game in Games, then choose Macros to configure it."))
-                .child(div().text_sm().text_color(cx.theme().muted_foreground).child("Windows software macros run while OpenMouse is in the tray. F8 saves a recording. Escape cancels recording or stops playback. Mouse triggers also perform their normal Back/Forward action. Extra G-keys, wheel movement and cursor movement are not recorded."))
+                .child(div().text_sm().text_color(cx.theme().muted_foreground).child("Game sets switch automatically when games open or close. Configure another game from Games → Macros."))
+                .child(div().text_sm().text_color(cx.theme().muted_foreground).child("F8 saves a recording. Escape stops or cancels. Triggers keep their normal input action. Dedicated G-keys, extra vendor buttons and cursor/wheel movement need separate support."))
                 .child(scopes)
                 .child(h_flex().gap_3().items_center().flex_wrap()
                     .child(Switch::new("macro-enable").checked(state.library.enabled).disabled(!cfg!(windows) || busy).on_change(cx.listener(|this, on: &bool, _, cx| { this.macro_engine.edit(|l| l.enabled = *on); cx.notify(); })))
@@ -326,7 +429,7 @@ impl AppView {
                     .child(Button::new("macro-stop").label("Stop / cancel").on_click(cx.listener(|this, _, _, cx| { this.macro_engine.stop(); cx.notify(); })))
                     .child(Button::new("macro-add").label("Add macro").disabled(busy || state.library.macros.len() >= 64).on_click(cx.listener(move |this, _, _, cx| {
                         let library = this.macro_engine.snapshot().library;
-                        let trigger = (0x70..=0x7b).filter(|k| *k != 0x77).map(|key| Trigger::Shortcut { key }).chain([Trigger::Mouse { button: 4 }, Trigger::Mouse { button: 5 }]).find(|t| !library.macros.iter().any(|m| m.game_id == scope && &m.trigger == t));
+                        let trigger = (0x70..=0x7b).filter(|k| *k != 0x77).map(|key| Trigger::Shortcut { key }).chain([Trigger::Mouse { button: 4 }, Trigger::Mouse { button: 5 }]).chain((0x7c..=0x87).map(|code| Trigger::Key { code, modifiers: 0 })).chain((0x41..=0x5a).map(|code| Trigger::Key { code, modifiers: 0 })).find(|t| !library.macros.iter().any(|m| m.game_id == scope && m.trigger.same_input(t)));
                         if let Some(trigger) = trigger { let i = library.macros.len(); this.macro_engine.edit(|l| l.macros.push(Macro { game_id: scope.clone(), name: format!("Macro {}", i + 1), trigger, repeats: 1, steps: Vec::new() })); this.macro_selected = Some(i); }
                         cx.notify();
                     }))))

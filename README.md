@@ -44,9 +44,19 @@ quitting the app stops them.
 2. Choose **Add macro**, select it, then choose **Record input**. Recording starts
    after one second and captures keyboard presses/releases and mouse button clicks.
    Press **F8** to save; **Escape** cancels and keeps the previous saved sequence.
-3. Choose a Ctrl+Alt+F1–F12 shortcut (F8 is reserved), or Mouse Back/Forward.
-   Adjust delays and the repeat count. Changes save automatically.
-4. Turn on **Enable automatic triggers**. OpenMouse detects the game's process,
+3. Choose **Assign input**, wait one second, then press a keyboard key or shortcut,
+   or click a mouse button. Left, right, middle, Back and Forward clicks are
+   supported. Modifier-only bindings are captured when the modifier is released.
+   Escape cancels assignment and stays reserved for stopping playback. F8 can
+   activate a macro outside recording; during recording it remains the save key.
+   The activation input must be released before it can play the macro.
+4. After saving a recording, drag each event row onto a green insertion line to
+   change the order. Drop above the first row or below the last row to move to
+   either end. Each event keeps its delay. Incomplete press/release orders can
+   be saved and reopened, but cannot play until corrected. Use the compact minus
+   and plus controls to adjust delays, and set the repeat count as needed.
+   Changes save automatically.
+5. Turn on **Enable automatic triggers**. OpenMouse detects the game's process,
    activates only its macro set and displays it in the editor. Closing that game
    restores another running game's set, or Default if no game runs. A game with
    no configured macros activates an empty set, rather than using another game's
@@ -65,9 +75,9 @@ a time; triggers during playback are ignored. A sequence has at most 1,000 event
 100 repeats, 60 seconds per delay and ten minutes total playback time.
 
 This first version uses ordinary Windows keyboard and mouse input, so a G915 X
-can trigger keyboard shortcuts and a G903 can trigger standard Back/Forward
-buttons without relying on onboard Logitech macro support. Mouse triggers retain
-their normal Back/Forward action. Dedicated G-keys, additional vendor-specific
+can trigger keys/shortcuts and a G903 can trigger standard Windows mouse
+buttons without relying on onboard Logitech macro support. Triggers retain
+their normal key/click action. Dedicated G-keys, additional vendor-specific
 buttons, wheel/cursor movement, remapping/suppressing triggers, custom game
 executables and hardware-specific validation are not included yet. Windows can
 reject input into an elevated application; the app reports rejected playback.

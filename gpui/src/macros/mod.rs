@@ -17,7 +17,7 @@ pub enum Action {
     Key { code: u16, down: bool },
     Mouse { button: u8, down: bool },
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Step {
     pub delay_ms: u32,
@@ -26,15 +26,44 @@ pub struct Step {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum Trigger {
-    Shortcut { key: u16 },
-    Mouse { button: u8 },
+    Key {
+        code: u16,
+        #[serde(default)]
+        modifiers: u8,
+    },
+    Shortcut {
+        key: u16,
+    },
+    Mouse {
+        button: u8,
+    },
 }
 impl Trigger {
+    pub fn same_input(&self, other: &Self) -> bool {
+        self.identity() == other.identity()
+    }
+    fn identity(&self) -> (u8, u16, u8) {
+        match *self {
+            Self::Key { code, modifiers } => (0, code, modifiers),
+            Self::Shortcut { key } => (0, key, 5),
+            Self::Mouse { button } => (1, u16::from(button), 0),
+        }
+    }
     pub fn label(&self) -> String {
         match self {
+            Self::Key { code, modifiers } => {
+                let mut parts = Vec::new();
+                for (bit, name) in [(1, "Ctrl"), (2, "Shift"), (4, "Alt"), (8, "Win")] {
+                    if modifiers & bit != 0 {
+                        parts.push(name.to_string());
+                    }
+                }
+                parts.push(key_name(*code));
+                parts.join(" + ")
+            }
             Self::Shortcut { key } => format!("Ctrl + Alt + {}", key_name(*key)),
             Self::Mouse { button } => {
-                format!("Mouse {}", if *button == 4 { "Back" } else { "Forward" })
+                format!("Mouse {}", mouse_name(*button))
             }
         }
     }
@@ -105,13 +134,15 @@ impl Library {
             {
                 return Err("Invalid macro name, repeat count or step count.".into());
             }
-            if triggers.contains(&(m.game_id.clone(), m.trigger.clone())) {
+            if triggers.contains(&(m.game_id.clone(), m.trigger.identity())) {
                 return Err("Choose a different trigger; that trigger is already assigned.".into());
             }
-            triggers.push((m.game_id.clone(), m.trigger.clone()));
+            triggers.push((m.game_id.clone(), m.trigger.identity()));
             match m.trigger {
+                Trigger::Key { code, modifiers }
+                    if (recordable_key(code) || code == 0x77) && modifiers <= 15 => {}
                 Trigger::Shortcut { key } if (0x70..=0x7b).contains(&key) && key != 0x77 => {}
-                Trigger::Mouse { button: 4 | 5 } => {}
+                Trigger::Mouse { button: 1..=5 } => {}
                 _ => return Err("Unsupported trigger.".into()),
             }
             let mut held = HashSet::new();
@@ -169,6 +200,15 @@ pub fn key_name(code: u16) -> String {
         _ => format!("Key 0x{code:02X}"),
     }
 }
+pub fn mouse_name(button: u8) -> &'static str {
+    match button {
+        1 => "left",
+        2 => "right",
+        3 => "middle",
+        4 => "Back",
+        _ => "Forward",
+    }
+}
 pub fn step_label(step: &Step) -> String {
     let (name, down) = match step.action {
         Action::Key { code, down } => (key_name(code), down),
@@ -194,6 +234,7 @@ pub struct Snapshot {
     pub recording: Option<usize>,
     /// Unsaved input captured by the recorder; never replaces the saved macro until F8.
     pub recorded_steps: Vec<Step>,
+    pub assigning: Option<usize>,
     pub playing: bool,
     pub message: String,
     pub active_game: Option<String>,
@@ -204,6 +245,7 @@ pub(super) struct State {
     pub capture: Option<(usize, std::time::Instant)>,
     pub draft: Vec<Step>,
     pub finish_requested: bool,
+    pub trigger_capture: Option<(usize, std::time::Instant)>,
 }
 pub struct Engine {
     state: Arc<Mutex<State>>,
@@ -229,6 +271,7 @@ impl Engine {
                     library,
                     recording: None,
                     recorded_steps: Vec::new(),
+                    assigning: None,
                     playing: false,
                     message,
                     active_game: None,
@@ -237,6 +280,7 @@ impl Engine {
                 capture: None,
                 draft: Vec::new(),
                 finish_requested: false,
+                trigger_capture: None,
             })),
             cancel: Arc::new(AtomicBool::new(false)),
             path,
@@ -298,6 +342,8 @@ impl Engine {
         if changed {
             self.cancel.store(true, Ordering::SeqCst);
             s.capture = None;
+            s.trigger_capture = None;
+            s.snapshot.assigning = None;
             s.snapshot.recording = None;
             s.draft.clear();
             s.snapshot.active_game = next;
@@ -310,11 +356,29 @@ impl Engine {
         self.cancel.store(true, Ordering::SeqCst);
         let mut s = self.state.lock().unwrap();
         s.capture = None;
+        s.trigger_capture = None;
+        if s.snapshot.assigning.take().is_some() {
+            s.snapshot.message = "Input assignment cancelled; previous binding kept.".into();
+        }
         s.draft.clear();
         s.finish_requested = false;
         if s.snapshot.recording.take().is_some() {
             s.snapshot.message = "Recording cancelled; saved steps kept.".into();
         }
+    }
+    pub fn assign_trigger(&self, index: usize) {
+        self.stop();
+        let mut s = self.state.lock().unwrap();
+        if s.snapshot.playing || index >= s.snapshot.library.macros.len() {
+            return;
+        }
+        s.snapshot.assigning = Some(index);
+        s.trigger_capture = Some((
+            index,
+            std::time::Instant::now() + std::time::Duration::from_secs(1),
+        ));
+        s.snapshot.message =
+            "Wait one second, then press a key, shortcut or mouse button. Escape cancels.".into();
     }
     pub fn record(&self, index: usize) {
         self.stop();
@@ -389,6 +453,14 @@ fn persist(path: Option<&std::path::Path>, library: &Library) -> Result<(), Stri
     Ok(())
 }
 
+/// Translate an insertion gap (including the trailing gap) into the final index.
+pub fn drop_target(from: usize, gap: usize, len: usize) -> Option<usize> {
+    if from >= len || gap > len {
+        return None;
+    }
+    let target = if gap > from { gap - 1 } else { gap };
+    (target != from).then_some(target)
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -459,6 +531,7 @@ mod tests {
                     },
                     recording: Some(0),
                     recorded_steps: Vec::new(),
+                    assigning: None,
                     playing: true,
                     message: String::new(),
                     active_game: Some("one".into()),
@@ -467,6 +540,7 @@ mod tests {
                 capture: Some((0, std::time::Instant::now())),
                 draft: vec![key(true)],
                 finish_requested: false,
+                trigger_capture: None,
             })),
             cancel: Arc::new(AtomicBool::new(false)),
             path: None,
@@ -567,5 +641,57 @@ mod tests {
         l.macros.push(valid);
         assert!(l.playback_error(0).is_some());
         assert!(l.playback_error(1).is_none());
+    }
+    #[test]
+    fn drag_gaps_support_first_last_and_ignore_noop_drops() {
+        assert_eq!(drop_target(3, 0, 4), Some(0));
+        assert_eq!(drop_target(0, 4, 4), Some(3));
+        assert_eq!(drop_target(1, 1, 4), None);
+        assert_eq!(drop_target(1, 2, 4), None);
+        assert_eq!(drop_target(4, 0, 4), None);
+        assert_eq!(drop_target(0, 5, 4), None);
+    }
+    #[test]
+    fn supports_standard_keys_shortcuts_and_all_five_mouse_buttons() {
+        for trigger in [
+            Trigger::Key {
+                code: 0x41,
+                modifiers: 0,
+            },
+            Trigger::Key {
+                code: 0x41,
+                modifiers: 3,
+            },
+            Trigger::Key {
+                code: 0x77,
+                modifiers: 0,
+            },
+        ] {
+            let mut l = library(vec![]);
+            l.macros[0].trigger = trigger;
+            assert!(l.validate().is_ok());
+        }
+        for button in 1..=5 {
+            let mut l = library(vec![]);
+            l.macros[0].trigger = Trigger::Mouse { button };
+            assert!(l.validate().is_ok());
+        }
+        let mut l = library(vec![]);
+        l.macros[0].trigger = Trigger::Key {
+            code: 0x1b,
+            modifiers: 0,
+        };
+        assert!(l.validate().is_err());
+    }
+    #[test]
+    fn captured_shortcut_cannot_duplicate_a_legacy_binding() {
+        let mut l = library(vec![]);
+        let mut other = l.macros[0].clone();
+        other.trigger = Trigger::Key {
+            code: 0x75,
+            modifiers: 5,
+        };
+        l.macros.push(other);
+        assert!(l.validate().is_err());
     }
 }

@@ -89,8 +89,52 @@ fn action(code: u16, pressed: bool) -> Action {
 }
 fn sample() -> HashSet<u16> {
     (1..=254)
-        .filter(|c| (matches!(c, 1 | 2 | 4 | 5 | 6) || recordable_key(*c)) && down(*c))
+        .filter(|c| {
+            (matches!(c, 1 | 2 | 4 | 5 | 6) || recordable_key(*c) || *c == 0x77) && down(*c)
+        })
         .collect()
+}
+fn modifier_bit(code: u16) -> u8 {
+    match code {
+        0xa2 | 0xa3 => 1,
+        0xa0 | 0xa1 => 2,
+        0xa4 | 0xa5 => 4,
+        0x5b | 0x5c => 8,
+        _ => 0,
+    }
+}
+fn modifiers() -> u8 {
+    [(0x11, 1), (0x10, 2), (0x12, 4), (0x5b, 8), (0x5c, 8)]
+        .iter()
+        .fold(
+            0,
+            |mask, (key, bit)| if down(*key) { mask | bit } else { mask },
+        )
+}
+fn captured_trigger(code: u16) -> Trigger {
+    match action(code, true) {
+        Action::Mouse { button, .. } => Trigger::Mouse { button },
+        _ => Trigger::Key {
+            code,
+            modifiers: modifiers() & !modifier_bit(code),
+        },
+    }
+}
+fn trigger_down(trigger: &Trigger) -> bool {
+    match *trigger {
+        Trigger::Key {
+            code,
+            modifiers: wanted,
+        } => down(code) && (modifiers() & !modifier_bit(code)) == wanted,
+        Trigger::Shortcut { key } => modifiers() == 5 && down(key),
+        Trigger::Mouse { button } => down(match button {
+            1 => 1,
+            2 => 2,
+            3 => 4,
+            4 => 5,
+            _ => 6,
+        }),
+    }
 }
 fn send(action: &Action) -> Result<(), String> {
     let input = match *action {
@@ -170,7 +214,7 @@ fn wait(ms: u32, cancel: &AtomicBool) -> bool {
 }
 pub(super) fn play(state: &Arc<Mutex<State>>, cancel: &Arc<AtomicBool>, index: usize) {
     let mut s = state.lock().unwrap();
-    if s.snapshot.playing || s.snapshot.recording.is_some() {
+    if s.snapshot.playing || s.snapshot.recording.is_some() || s.snapshot.assigning.is_some() {
         return;
     }
     let Some(m) = s.snapshot.library.macros.get(index).cloned() else {
@@ -238,6 +282,8 @@ pub(super) fn start(weak: Weak<Mutex<State>>, cancel: Arc<AtomicBool>, path: Opt
         let mut held: HashSet<u16> = HashSet::new();
         let mut triggers = HashSet::new();
         let mut after_playback = false;
+        let mut assigning = None;
+        let mut pending_modifier = None;
         loop {
             std::thread::sleep(Duration::from_millis(8));
             let Some(state) = weak.upgrade() else {
@@ -262,6 +308,8 @@ pub(super) fn start(weak: Weak<Mutex<State>>, cancel: Arc<AtomicBool>, path: Opt
             if down(0x1b) {
                 cancel.store(true, Ordering::SeqCst);
                 s.capture = None;
+                s.trigger_capture = None;
+                s.snapshot.assigning = None;
                 s.snapshot.recording = None;
                 s.draft.clear();
                 s.snapshot.message = "Stopped by Escape".into();
@@ -269,6 +317,59 @@ pub(super) fn start(weak: Weak<Mutex<State>>, cancel: Arc<AtomicBool>, path: Opt
                 previous = now;
                 continue;
             }
+            if let Some((index, ready)) = s.trigger_capture {
+                if Instant::now() < ready {
+                    previous = now;
+                    continue;
+                }
+                if assigning != Some((index, ready)) {
+                    assigning = Some((index, ready));
+                    pending_modifier = None;
+                    previous = now.clone();
+                }
+                let mut pressed: Vec<_> = now.difference(&previous).copied().collect();
+                pressed.sort_unstable();
+                let mut chosen = None;
+                for code in pressed {
+                    if modifier_bit(code) != 0 {
+                        pending_modifier = Some(code);
+                    } else {
+                        chosen = Some(captured_trigger(code));
+                        break;
+                    }
+                }
+                if chosen.is_none() {
+                    if let Some(code) = pending_modifier {
+                        if !now.contains(&code) {
+                            chosen = Some(Trigger::Key { code, modifiers: 0 });
+                        }
+                    }
+                }
+                if let Some(trigger) = chosen {
+                    let mut next = s.snapshot.library.clone();
+                    if let Some(m) = next.macros.get_mut(index) {
+                        m.trigger = trigger.clone();
+                    }
+                    match next
+                        .validate_editing()
+                        .and_then(|_| persist(path.as_deref(), &next))
+                    {
+                        Ok(()) => {
+                            s.snapshot.library = next;
+                            s.snapshot.message = format!("Assigned {}", trigger.label());
+                        }
+                        Err(e) => s.snapshot.message = e,
+                    }
+                    s.trigger_capture = None;
+                    s.snapshot.assigning = None;
+                    assigning = None;
+                    // Wait for the assigned input to be released before arming it.
+                    after_playback = true;
+                }
+                previous = now;
+                continue;
+            }
+            assigning = None;
             if let Some((index, ready)) = s.capture {
                 if Instant::now() < ready {
                     previous = now;
@@ -348,10 +449,7 @@ pub(super) fn start(weak: Weak<Mutex<State>>, cancel: Arc<AtomicBool>, path: Opt
                         .enumerate()
                         .filter(|(_, m)| m.game_id == s.snapshot.active_game)
                     {
-                        let is_down = match m.trigger {
-                            Trigger::Shortcut { key } => down(0x11) && down(0x12) && down(key),
-                            Trigger::Mouse { button } => down(if button == 4 { 5 } else { 6 }),
-                        };
+                        let is_down = trigger_down(&m.trigger);
                         if is_down {
                             active.insert(i);
                             if !triggers.contains(&i) && chosen.is_none() {
