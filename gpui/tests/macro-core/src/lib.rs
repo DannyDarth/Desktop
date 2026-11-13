@@ -94,3 +94,7 @@ pub mod profiles;
 
 #[path = "../../../src/firmware.rs"]
 pub mod firmware;
+
+#[cfg(windows)]
+#[path = "../../../src/single_instance.rs"]
+pub mod single_instance;

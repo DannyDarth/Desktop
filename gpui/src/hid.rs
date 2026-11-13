@@ -361,6 +361,10 @@ impl HidService {
         self.call("keyboardCycleErrors", None, |json| serde_json::from_str(&json).map_err(|e| e.to_string()))
     }
 
+    pub fn restore_keyboard_lighting(&self) {
+        drop(self.call("restoreKeyboardLighting",None,|_|Ok(())));
+    }
+
     /// Preferences the JS layer needs when it lays controls out. Sent before a
     /// connect; calls are served in order, so the connect sees them.
     pub fn set_prefs(&self, link_left_right: Option<bool>) {

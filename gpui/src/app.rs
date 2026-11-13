@@ -476,7 +476,9 @@ pub struct AppView {
     macro_engine: crate::macros::Engine,
     macro_scope: Option<String>,
     macro_last_active: Option<String>,
+    macro_last_focused: Option<String>,
     macro_notice_pending: Option<crate::overlay::ProfileNotice>,
+    macro_notice_since: Option<std::time::Instant>,
     macro_text_edit: Option<macros_view::MacroTextEdit>,
     game_delete_pending: Option<String>,
     firmware_checks: std::collections::HashMap<String,crate::firmware::CheckState>,
@@ -630,7 +632,9 @@ impl AppView {
             macro_engine: crate::macros::Engine::load(),
             macro_scope: None,
             macro_last_active: None,
+            macro_last_focused: None,
             macro_notice_pending: None,
+            macro_notice_since: None,
             macro_text_edit: None,
             game_delete_pending: None,
             firmware_checks: Default::default(),
@@ -706,7 +710,9 @@ impl Default for AppView {
             macro_engine: crate::macros::Engine::load(),
             macro_scope: None,
             macro_last_active: None,
+            macro_last_focused: None,
             macro_notice_pending: None,
+            macro_notice_since: None,
             macro_text_edit: None,
             game_delete_pending: None,
             firmware_checks: Default::default(),
@@ -1494,6 +1500,7 @@ impl AppView {
         for id in closed {
             self.on_game_closed(&id, cx);
         }
+        if !started.is_empty() {self.hid_service().restore_keyboard_lighting();}
         for id in started {
             self.on_game_started(&id, cx);
         }
@@ -1519,12 +1526,28 @@ impl AppView {
         .detach();
     }
 
+    fn log_profile_transition(state:&crate::macros::Snapshot,notifications:bool,event:&str) {
+        use std::io::Write;
+        let Some(dir)=dirs::config_dir().map(|p|p.join("openmouse")) else {return};
+        let _=std::fs::create_dir_all(&dir);let path=dir.join("profile-switch.log");
+        let reset=std::fs::metadata(&path).is_ok_and(|m|m.len()>256*1024);
+        if let Ok(mut file)=std::fs::OpenOptions::new().create(true).write(true).append(!reset).truncate(reset).open(path) {
+            let value=serde_json::json!({"time":std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok().map(|t|t.as_secs()),"event":event,"active":state.active_game,"focused":state.focused_game,"whileFocused":state.active_game.as_ref().is_some_and(|id|state.library.focus_only.contains(id)),"notifications":notifications});
+            let _=writeln!(file,"{value}");
+        }
+    }
+
     /// Queue the newest profile change while Alt/Windows is held. This keeps
     /// the full popup lifetime visible after the OS switcher has been released.
     fn sync_macro_profile_notice(&mut self, cx: &mut Context<Self>) {
         let state = self.macro_engine.snapshot();
+        if state.focused_game != self.macro_last_focused || state.active_game != self.macro_last_active {
+            Self::log_profile_transition(&state,self.settings.overlay_enabled,"state changed");
+            self.macro_last_focused=state.focused_game.clone();
+        }
         if state.active_game != self.macro_last_active {
             self.macro_last_active = state.active_game.clone();
+            self.hid_service().restore_keyboard_lighting();
             self.macro_scope = state.active_game.clone(); self.macro_selected = None; self.macro_text_edit = None;
             if self.settings.overlay_enabled {
                 let (title, subtitle, detail) = match state.active_game.as_deref() {
@@ -1534,13 +1557,16 @@ impl AppView {
                         if state.library.enabled { "Game is no longer focused" } else { "Automatic triggers off" }),
                 };
                 self.macro_notice_pending = Some(crate::overlay::ProfileNotice {title,subtitle:subtitle.into(),detail:detail.into()});
+                self.macro_notice_since=Some(std::time::Instant::now());
             }
             cx.notify();
         }
-        if !self.settings.overlay_enabled {self.macro_notice_pending=None;return;}
-        if self.macro_engine.profile_notice_ready() {
+        if !self.settings.overlay_enabled {self.macro_notice_pending=None;self.macro_notice_since=None;return;}
+        if self.macro_engine.profile_notice_ready() || self.macro_notice_since.is_some_and(|since|since.elapsed()>=Duration::from_secs(2)) {
             if let Some(notice)=self.macro_notice_pending.take() {
+                self.macro_notice_since=None;
                 self.overlay=crate::overlay::show_profile(cx,self.overlay.take(),notice);
+                Self::log_profile_transition(&state,true,if self.overlay.is_some() {"popup opened"}else{"popup failed"});
             }
         }
     }
@@ -3143,7 +3169,7 @@ impl AppView {
             TileStatus::Connected(r) if r.keyboard => {
                 let mut col = div().flex().flex_col().gap_3().w_full().min_w_0().max_w(px(720.))
                     .child(div().text_lg().child(if self.devices.tab == DeviceTab::Advanced { "Keyboard details" } else { "Keyboard lighting" }))
-                    .child(div().text_sm().text_color(muted).child(if self.devices.tab == DeviceTab::Advanced { "Information reported by your keyboard." } else { "Cycling runs while OpenMouse is open. Selecting a solid color or another effect stops it." }));
+                    .child(div().text_sm().text_color(muted).child(if self.devices.tab == DeviceTab::Advanced { "Information reported by your keyboard." } else { "Lighting you set here is re-applied when a game starts. Cycling runs while OpenMouse is open." }));
                 let sections = if self.devices.tab == DeviceTab::Advanced { &r.tabs.advanced } else { &r.tabs.keyboard_lighting };
                 for section in sections {
                     for control in &section.controls { col = col.child(self.render_control(control, cx)); }

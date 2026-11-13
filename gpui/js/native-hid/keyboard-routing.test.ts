@@ -91,3 +91,16 @@ assert.equal(decoded[0].prefix,"KBD");assert.equal(decoded[0].version,"1.10");as
 const mouseClient={getFeature:async()=>({index:3}),request:async(_index:number,fn:number)=>new Uint8Array([0,0,0,...(fn===0 ? [1] : entity)])};
 assert.deepEqual(await readLogitechFirmwareDetails(mouseClient,false),decoded);
 console.log("Firmware entity checks passed (keyboard/mouse reports and full build number).");
+
+const {KeyboardLightingMemory}=await import("./keyboard-lighting-memory");
+const memory=new KeyboardLightingMemory();
+assert.equal(memory.plan("keyboard"),null,"Never invent a color for devices the user has not configured");
+memory.remember("keyboard","keyboard.color","#ff0000");
+const oldPlan=memory.plan("keyboard")!;
+memory.remember("keyboard","keyboard.effect","Cycling");
+assert.notEqual(memory.revision("keyboard"),oldPlan.revision,"A newer user edit invalidates an in-flight restore");
+assert.deepEqual(memory.plan("keyboard")!.commands,[{id:"keyboard.effect",value:"Cycling"}]);
+memory.remember("keyboard","keyboard.brightness",80);memory.remember("keyboard","keyboard.illumination",false);
+assert.equal(memory.plan("keyboard")!.commands.at(-1)!.value,false,"An explicit backlight Off remains Off after restore");
+assert.equal(memory.plan("other keyboard"),null);
+console.log("Lighting restore checks passed (ownership, latest edit, cycling and explicit Off).");

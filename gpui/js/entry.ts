@@ -1,6 +1,6 @@
 import { LOGITECH_RECEIVER_PRODUCTS } from "@openmouse/keyboard-protocol/logitech";
 import { keyboardArt } from "./native-hid/keyboard-art";
-import { keyboardTabs, writeKeyboardLighting, keyboardCycleNote, takeKeyboardCycleErrors } from "./native-hid/keyboard-lighting";
+import { keyboardTabs, writeKeyboardLighting, keyboardCycleNote, takeKeyboardCycleErrors, scheduleKeyboardLightingRestore } from "./native-hid/keyboard-lighting";
 // Entry for the JS bundle embedded in the GPUI app (see build.mjs). Exposes
 // the same list/connect flow the Tauri app runs (src/native-hid/scan.ts),
 // bundled unmodified, behind two JSON-in/JSON-out functions for Rust.
@@ -24,6 +24,10 @@ const lastCaps = new Map<string, any>();
 const mockWanted = (): string => String((globalThis as any).__mock ?? "");
 
 (globalThis as any).__api = {
+  async restoreKeyboardLighting(): Promise<string> {
+    scheduleKeyboardLightingRestore([...lastList.values()].filter(c=>lastStatus.get(c.info.key)?.ui?.settingsReady===false && lastStatus.get(c.info.key)?.logitech).map(c=>({info:c.info,name:lastStatus.get(c.info.key).name})));
+    return "{}";
+  },
   async keyboardCycleErrors(): Promise<string> { return JSON.stringify(takeKeyboardCycleErrors()); },
   async listCandidates(): Promise<string> {
     // A trailing "!" on OPENMOUSE_MOCK (e.g. "ulx!") lists only the fakes.

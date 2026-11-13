@@ -1,9 +1,34 @@
+import { KeyboardLightingMemory } from "./keyboard-lighting-memory";
 import { KeyboardCycle } from "./keyboard-cycle";
 import { LogitechKeyboardHidClient } from "@openmouse/keyboard-protocol/drivers/logitech/hid";
 import { logitechRgbMode } from "@openmouse/keyboard-protocol/logitech";
 import { TauriHidDevice, type HidInterfaceInfo } from "./tauri-hid-device";
 import { withHidOpenLockRetrying, withHidOpenLock, isHidBusyError } from "./hid-open-lock";
 const cycles = new Map<string, KeyboardCycle>();
+const lightingMemory=new KeyboardLightingMemory();
+const configuredModels=new Map<string,string>();
+const restoreJobs=new Map<string,number>();
+let restoreSerial=0;
+export function scheduleKeyboardLightingRestore(devices:{info:HidInterfaceInfo,name:string}[]) {
+  for(const {info,name} of devices) {
+    if(configuredModels.get(info.key)!==name)continue;
+    if(!lightingMemory.plan(info.key)) continue;
+    const job=++restoreSerial;restoreJobs.set(info.key,job);
+    for(const delay of [600,2600]) setTimeout(async()=> {
+      if(restoreJobs.get(info.key)!==job)return;
+      const plan=lightingMemory.plan(info.key);if(!plan)return;
+      try {
+        for(const command of plan.commands) {
+          if(restoreJobs.get(info.key)!==job || lightingMemory.revision(info.key)!==plan.revision)return;
+          await writeKeyboardLighting(info,command.id,command.value,false,plan.revision);
+        }
+      } catch(error) {
+        const message=`Could not restore keyboard lighting: ${error instanceof Error?error.message:String(error)}`;
+        pendingCycleErrors.set(info.key,message);
+      }
+    },delay);
+  }
+}
 const cycleErrors = new Map<string,string>();
 const pendingCycleErrors = new Map<string,string>();
 export function takeKeyboardCycleErrors() { const errors=[...pendingCycleErrors]; pendingCycleErrors.clear(); return errors; }
@@ -36,12 +61,14 @@ export function keyboardTabs(status: any) {
     {id:"keyboard.note",label:"Support",kind:"info",current:status.ui?.statusNote ?? "Controls are limited to capabilities reported by this keyboard."},
   ]}]};
 }
-export async function writeKeyboardLighting(info: HidInterfaceInfo, id: string, value: any) {
+export async function writeKeyboardLighting(info: HidInterfaceInfo, id: string, value: any, remember=true, expectedRevision?:number) {
   return withHidOpenLockRetrying(info.key, async () => {
+    if(expectedRevision!==undefined && lightingMemory.revision(info.key)!==expectedRevision)return value;
     const client = new LogitechKeyboardHidClient(new TauriHidDevice(info, {usagePage:0xff00,usage:1}));
     try {
       await client.open();
       const status = await client.readStatus();
+      if(!remember && configuredModels.get(info.key)!==status.name)return value;
       const control = keyboardTabs(status).keyboardLighting[0].controls.find(c=>c.id===id);
       if (!control || control.kind === "info") throw new Error("This keyboard does not support that lighting control.");
       if (control.kind === "choice" && !control.options.some((o:any)=>o.value===value)) throw new Error("Unsupported lighting value.");
@@ -98,6 +125,12 @@ export async function writeKeyboardLighting(info: HidInterfaceInfo, id: string, 
           for (const zone of light.legacyZones.filter(z=>z.effects.some(e=>e.id===1))) await client.setLegacyZoneColor(zone.index,rgb[0],rgb[1],rgb[2]);
         } else await applyKeyboardEffect(client,status,"Static",rgb);
       } else throw new Error("Unknown keyboard lighting action.");
+      if(remember) {
+        if(configuredModels.get(info.key)!==status.name)lightingMemory.forget(info.key);
+        configuredModels.set(info.key,status.name);
+        lightingMemory.remember(info.key,id,value);
+        if(id==="keyboard.illumination" && value===true)scheduleKeyboardLightingRestore([{info,name:status.name}]);
+      }
       return value;
     } finally { await client.close().catch(()=>undefined); }
   });

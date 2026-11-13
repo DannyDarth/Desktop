@@ -22,3 +22,6 @@ mod wallpaper_win;
 pub mod macros;
 
 pub mod firmware;
+
+#[cfg(windows)]
+pub mod single_instance;
