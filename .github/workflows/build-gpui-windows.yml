@@ -100,18 +100,25 @@ jobs:
       # Needs the app's .exe to exist first: its build.rs embeds those bytes
       # as the installer's payload (see gpui/installer/build.rs).
       - name: Build installer
-        if: github.event_name == 'workflow_dispatch' && inputs.build_installer
+        if: (github.event_name == 'workflow_dispatch' && inputs.build_installer) || github.head_ref == 'feature/windows-game-macros' || github.ref_name == 'feature/windows-game-macros'
         run: cargo build --release
         working-directory: gpui/installer
         env:
           OPENMOUSE_GPUI_EXE: ../target/ci/openmouse-gpui.exe
 
+      - name: Test installer
+        if: (github.event_name == 'workflow_dispatch' && inputs.build_installer) || github.head_ref == 'feature/windows-game-macros' || github.ref_name == 'feature/windows-game-macros'
+        run: cargo test --locked
+        working-directory: gpui/installer
+        env:
+          OPENMOUSE_GPUI_EXE: ../target/ci/openmouse-gpui.exe
+
       - name: Rename installer artifact
-        if: github.event_name == 'workflow_dispatch' && inputs.build_installer
+        if: (github.event_name == 'workflow_dispatch' && inputs.build_installer) || github.head_ref == 'feature/windows-game-macros' || github.ref_name == 'feature/windows-game-macros'
         run: cp gpui/installer/target/release/openmouse-installer.exe OpenMouseDesktopSetup.exe
 
       - uses: actions/upload-artifact@v4
-        if: github.event_name == 'workflow_dispatch' && inputs.build_installer
+        if: (github.event_name == 'workflow_dispatch' && inputs.build_installer) || github.head_ref == 'feature/windows-game-macros' || github.ref_name == 'feature/windows-game-macros'
         with:
           name: openmouse-windows
           path: OpenMouseDesktopSetup.exe

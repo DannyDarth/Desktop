@@ -1,3 +1,4 @@
+mod app_lock;
 pub mod colors;
 pub mod devices;
 pub mod paths;
@@ -23,6 +24,7 @@ pub struct StepUpdate {
 /// shortcut, the optional Desktop shortcut, and the Add/Remove Programs
 /// registry entry. `report` is called after each step for progress UI.
 pub fn install(desktop_shortcut: bool, mut report: impl FnMut(StepUpdate)) -> Result<(), String> {
+    ensure_app_closed()?;
     let total = if desktop_shortcut { 5 } else { 4 };
     let mut done = 0;
     let mut step = |label: &'static str, result: Result<(), String>, report: &mut dyn FnMut(StepUpdate)| {
@@ -67,9 +69,16 @@ pub fn install(desktop_shortcut: bool, mut report: impl FnMut(StepUpdate)) -> Re
 /// itself, which the caller must remove via [`spawn_self_delete`] once this
 /// process (and its lock on the directory/its own .exe) has exited.
 pub fn uninstall() -> Result<(), String> {
+    ensure_app_closed()?;
     shortcuts::remove_start_menu();
     shortcuts::remove_desktop();
     registry::remove()
+}
+
+/// Check before changing shortcuts or registration, so a running app leaves
+/// the existing installation intact. Opening never truncates the executable.
+fn ensure_app_closed() -> Result<(), String> {
+    app_lock::ensure_file_available(&paths::app_exe_path())
 }
 
 /// Windows won't let a running .exe delete its own containing directory.

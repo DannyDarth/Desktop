@@ -247,7 +247,7 @@ impl Render for InstallerView {
                 .flex_col()
                 .gap_5()
                 .child(div().text_sm().text_color(muted).child(
-                    "This removes OpenMouse Desktop, its shortcuts, and its Add/Remove Programs entry. Your settings and paired-device data are not touched.",
+                    "This removes OpenMouse Desktop, its shortcuts, and its Add/Remove Programs entry. Your games, macros, lighting preferences, and other saved settings are kept.",
                 ))
                 .child(
                     h_flex()
@@ -315,7 +315,7 @@ impl Render for InstallerView {
                 let (headline, message): (&str, String) = match (&self.error, self.uninstall_mode) {
                     (Some(error), _) => ("Something went wrong", error.clone()),
                     (None, true) => ("All done", "OpenMouse Desktop has been removed.".to_string()),
-                    (None, false) => ("You're all set", "OpenMouse Desktop is installed and ready to go.".to_string()),
+                    (None, false) => ("You're all set", "OpenMouse Desktop is installed. Your saved games, macros, and settings are ready to use.".to_string()),
                 };
                 // Pops in with the same fade+rise as the step transition
                 // below, just keyed separately so it re-triggers on its own.
