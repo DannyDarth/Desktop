@@ -135,3 +135,20 @@ of the four types. Existing recordings and bindings are preserved. Physical
 keyboard/mouse monitoring ignores injected output, preventing a macro from
 stopping or retriggering itself. Escape, Stop, and game/profile changes cancel
 playback and release injected held inputs.
+
+
+## Focused game macro profiles (Windows)
+
+Select a game's set on the Macros page and choose **While focused** under
+**Activate game macros**. That set is active only while the game's executable
+owns the foreground window. Alt+Tab immediately requests cancellation of any
+playing macro, releases injected held inputs, and selects Default or another
+eligible While running profile. Returning to the game reactivates its set;
+previously stopped playback does not resume automatically.
+
+Foreground checks run about every 100 ms, independently of the slower process
+scan. This option is saved per game. **While running** remains the default for
+existing profiles and retains their behavior when alt-tabbing. This controls
+macro sets; existing device DPI/onboard game profiles keep their existing
+process-based switching. Game detection still uses the current executable
+catalog; custom executable selection is not included in this change.

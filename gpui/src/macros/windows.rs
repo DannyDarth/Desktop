@@ -1,5 +1,6 @@
 //! Native Windows input sampling and playback. The worker never samples injected
 //! events during playback, and releases its held inputs on every exit path.
+mod focus;
 mod physical;
 use super::*;
 use std::{
@@ -429,7 +430,13 @@ pub(super) fn play(
         });
     });
 }
-pub(super) fn start(weak: Weak<Mutex<State>>, cancel: Arc<AtomicBool>, path: Option<PathBuf>) {
+pub(super) fn start(
+    weak: Weak<Mutex<State>>,
+    cancel: Arc<AtomicBool>,
+    path: Option<PathBuf>,
+    catalog: Vec<(String, Vec<String>)>,
+) {
+    focus::start(weak.clone(), cancel.clone(), catalog);
     physical::start(weak.clone());
     std::thread::spawn(move || {
         let mut previous = sample();

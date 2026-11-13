@@ -142,6 +142,39 @@ impl AppView {
                 },
             ));
         }
+        let mut activation = div().flex().flex_col().gap_2();
+        if let Some(game_id) = scope.clone() {
+            let focus_only = state.library.focus_only.contains(&game_id);
+            let mut options = h_flex()
+                .gap_2()
+                .items_center()
+                .flex_wrap()
+                .child(div().text_sm().child("Activate game macros:"));
+            for (focused, label) in [(false, "While running"), (true, "While focused")] {
+                let id = game_id.clone();
+                options = options.child(self.chip(
+                    format!("macro-focus-{focused}"),
+                    label.into(),
+                    focus_only == focused,
+                    cx,
+                    move |this, cx| {
+                        if busy || !cfg!(windows) {
+                            return;
+                        }
+                        this.macro_engine.edit(|l| {
+                            if focused {
+                                l.focus_only.insert(id.clone());
+                            } else {
+                                l.focus_only.remove(&id);
+                            }
+                        });
+                        cx.notify();
+                    },
+                ));
+            }
+            activation = activation.child(options).child(div().text_xs().text_color(cx.theme().muted_foreground)
+                .child(if focus_only { "Alt+Tab switches away from this macro set and stops its playback. Returning to the game reactivates the set." } else { "Keeps this game's macro set active while it runs, including after Alt+Tab." }));
+        }
         let mut list = div().flex().flex_col().gap_2();
         for (i, m) in state
             .library
@@ -512,7 +545,7 @@ impl AppView {
                 .child(div().text_sm().child(format!("Active set: {active_name}. Editing: {scope_name}.")))
                 .child(div().text_sm().text_color(cx.theme().muted_foreground).child("Game sets switch automatically when games open or close. Configure another game from Games → Macros."))
                 .child(div().text_sm().text_color(cx.theme().muted_foreground).child("F8 saves a recording. Escape stops or cancels. Triggers keep their normal input action. Dedicated G-keys, extra vendor buttons and cursor/wheel movement need separate support."))
-                .child(scopes)
+                .child(scopes).child(activation)
                 .child(h_flex().gap_3().items_center().flex_wrap()
                     .child(Switch::new("macro-enable").checked(state.library.enabled).disabled(!cfg!(windows) || busy).on_change(cx.listener(|this, on: &bool, _, cx| { this.macro_engine.edit(|l| l.enabled = *on); cx.notify(); })))
                     .child("Enable automatic triggers")

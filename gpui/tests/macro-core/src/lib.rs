@@ -42,6 +42,7 @@ mod tests {
         let mut second = m.clone();
         second.game_id = Some("two".into());
         let l = Library {
+            focus_only: Default::default(),
             enabled: true,
             macros: vec![m, second],
         };

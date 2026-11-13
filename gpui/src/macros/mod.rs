@@ -185,6 +185,8 @@ fn validate_order(m: &Macro) -> Result<(), String> {
 pub struct Library {
     pub enabled: bool,
     pub macros: Vec<Macro>,
+    #[serde(default)]
+    pub focus_only: HashSet<String>,
 }
 impl Library {
     /// The delay belongs to its event and travels with it. Playback validation
@@ -227,6 +229,7 @@ impl Library {
             return Some("Macro no longer exists.".into());
         };
         Library {
+            focus_only: HashSet::new(),
             enabled: false,
             macros: vec![m.clone()],
         }
@@ -346,6 +349,7 @@ pub struct Snapshot {
     pub message: String,
     pub active_game: Option<String>,
     pub running_games: Vec<String>,
+    pub focused_game: Option<String>,
 }
 pub(super) struct State {
     pub snapshot: Snapshot,
@@ -384,6 +388,7 @@ impl Engine {
                     message,
                     active_game: None,
                     running_games: Vec::new(),
+                    focused_game: None,
                 },
                 capture: None,
                 draft: Vec::new(),
@@ -394,12 +399,15 @@ impl Engine {
             path,
         }
     }
-    pub fn start(&self) {
+    pub fn start(&self, catalog: Vec<(String, Vec<String>)>) {
+        #[cfg(not(windows))]
+        let _ = &catalog;
         #[cfg(windows)]
         windows::start(
             Arc::downgrade(&self.state),
             self.cancel.clone(),
             self.path.clone(),
+            catalog,
         );
     }
     pub fn snapshot(&self) -> Snapshot {
@@ -450,21 +458,14 @@ impl Engine {
     }
     pub fn sync_games(&self, running: Vec<String>) -> bool {
         let mut s = self.state.lock().unwrap();
-        let next = choose_game(
+        let next = choose_active_game(
             s.snapshot.active_game.as_deref(),
             &s.snapshot.running_games,
             &running,
+            s.snapshot.focused_game.as_deref(),
+            &s.snapshot.library.focus_only,
         );
-        let changed = next != s.snapshot.active_game;
-        if changed {
-            self.cancel.store(true, Ordering::SeqCst);
-            s.capture = None;
-            s.trigger_capture = None;
-            s.snapshot.assigning = None;
-            s.snapshot.recording = None;
-            s.draft.clear();
-            s.snapshot.active_game = next;
-        }
+        let changed = apply_active_game(&mut s, next, &self.cancel);
         s.snapshot.running_games = running;
         changed
     }
@@ -536,6 +537,41 @@ impl Drop for Engine {
     }
 }
 
+pub fn choose_active_game(
+    current: Option<&str>,
+    previous: &[String],
+    running: &[String],
+    focused: Option<&str>,
+    focus_only: &HashSet<String>,
+) -> Option<String> {
+    if let Some(id) = focused.filter(|id| focus_only.contains(*id)) {
+        return Some(id.to_string());
+    }
+    let eligible: Vec<_> = running
+        .iter()
+        .filter(|id| !focus_only.contains(*id))
+        .cloned()
+        .collect();
+    choose_game(current, previous, &eligible)
+}
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(super) fn apply_active_game(
+    state: &mut State,
+    next: Option<String>,
+    cancel: &AtomicBool,
+) -> bool {
+    if state.snapshot.active_game == next {
+        return false;
+    }
+    cancel.store(true, Ordering::SeqCst);
+    state.capture = None;
+    state.trigger_capture = None;
+    state.snapshot.assigning = None;
+    state.snapshot.recording = None;
+    state.draft.clear();
+    state.snapshot.active_game = next;
+    true
+}
 /// The newest detected game takes priority; closing it restores another running game.
 pub fn choose_game(
     current: Option<&str>,
@@ -602,6 +638,7 @@ mod tests {
     use super::*;
     fn library(steps: Vec<Step>) -> Library {
         Library {
+            focus_only: HashSet::new(),
             enabled: false,
             macros: vec![Macro {
                 mode: MacroMode::Count,
@@ -665,6 +702,7 @@ mod tests {
             state: Arc::new(Mutex::new(State {
                 snapshot: Snapshot {
                     library: Library {
+                        focus_only: HashSet::new(),
                         enabled: true,
                         macros: vec![],
                     },
@@ -676,6 +714,7 @@ mod tests {
                     message: String::new(),
                     active_game: Some("one".into()),
                     running_games: vec!["one".into()],
+                    focused_game: None,
                 },
                 capture: Some((0, std::time::Instant::now())),
                 draft: vec![key(true)],
@@ -907,5 +946,56 @@ mod tests {
         assert_eq!(reopened.macros[0].mode, MacroMode::Sequence);
         assert_eq!(reopened.macros[0].on_press[0].action, key(false).action);
         assert!(reopened.playback_error(0).is_some());
+    }
+    #[test]
+    fn focused_profile_follows_alt_tab_and_returns() {
+        let only: HashSet<_> = ["game".to_string()].into_iter().collect();
+        let running = vec!["game".to_string()];
+        assert_eq!(
+            choose_active_game(None, &running, &running, Some("game"), &only),
+            Some("game".into())
+        );
+        assert_eq!(
+            choose_active_game(Some("game"), &running, &running, None, &only),
+            None
+        );
+        assert_eq!(
+            choose_active_game(None, &running, &running, Some("game"), &only),
+            Some("game".into())
+        );
+    }
+    #[test]
+    fn focused_game_has_priority_and_running_profiles_keep_their_behavior() {
+        let only: HashSet<_> = ["focused".to_string()].into_iter().collect();
+        let running = vec!["background".to_string(), "focused".to_string()];
+        assert_eq!(
+            choose_active_game(
+                Some("background"),
+                &running,
+                &running,
+                Some("focused"),
+                &only
+            ),
+            Some("focused".into())
+        );
+        assert_eq!(
+            choose_active_game(Some("focused"), &running, &running, None, &only),
+            Some("background".into())
+        );
+        // Foreground detection can activate before the slower process scan catches up.
+        assert_eq!(
+            choose_active_game(None, &[], &[], Some("focused"), &only),
+            Some("focused".into())
+        );
+    }
+    #[test]
+    fn focus_preferences_persist_per_game_without_changing_existing_defaults() {
+        let old = r#"{"enabled":false,"macros":[]}"#;
+        let mut l: Library = serde_json::from_str(old).unwrap();
+        assert!(l.focus_only.is_empty());
+        l.focus_only.insert("game".into());
+        let reopened: Library = serde_json::from_str(&serde_json::to_string(&l).unwrap()).unwrap();
+        assert!(reopened.focus_only.contains("game"));
+        assert!(!reopened.focus_only.contains("other"));
     }
 }

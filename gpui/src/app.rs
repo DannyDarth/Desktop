@@ -467,6 +467,7 @@ pub struct AppView {
     settings: Settings,
     macro_engine: crate::macros::Engine,
     macro_scope: Option<String>,
+    macro_last_active: Option<String>,
     macro_selected: Option<usize>,
     games: Vec<Game>,
     devices: Devices,
@@ -615,6 +616,7 @@ impl AppView {
             page: Page::Overview,
             macro_engine: crate::macros::Engine::load(),
             macro_scope: None,
+            macro_last_active: None,
             macro_selected: None,
             sidebar_collapsed: false,
             settings,
@@ -654,11 +656,17 @@ impl AppView {
         if view.settings.discord_presence {
             view.set_discord(true, cx);
         }
-        view.macro_engine.start();
+        view.macro_engine.start(view.games.iter().map(|g| (g.id.clone(), g.executables.clone())).collect());
         cx.spawn(async move |view, cx| {
             loop {
                 futures_timer::Delay::new(Duration::from_millis(150)).await;
-                if view.update(cx, |v, cx| { if v.page == Page::Macros { cx.notify(); } }).is_err() { break; }
+                if view.update(cx, |v, cx| {
+                    let active = v.macro_engine.snapshot().active_game;
+                    if active != v.macro_last_active {
+                        v.macro_last_active = active.clone(); v.macro_scope = active; v.macro_selected = None; cx.notify();
+                    }
+                    if v.page == Page::Macros { cx.notify(); }
+                }).is_err() { break; }
             }
         }).detach();
         view.scan_devices(cx);
@@ -681,6 +689,7 @@ impl Default for AppView {
             slider_seq: 0,
             macro_engine: crate::macros::Engine::load(),
             macro_scope: None,
+            macro_last_active: None,
             macro_selected: None,
             sidebar_collapsed: false,
             settings: Settings::default(),
@@ -1422,6 +1431,7 @@ impl AppView {
         running.extend(started.iter().cloned());
         if self.macro_engine.sync_games(running) {
             self.macro_scope = self.macro_engine.snapshot().active_game;
+            self.macro_last_active = self.macro_scope.clone();
             self.macro_selected = None;
             cx.notify();
         }
