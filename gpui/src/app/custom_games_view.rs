@@ -1,5 +1,82 @@
 use super::*;
 impl AppView {
+    pub(crate) fn report_game_discovery_error(&mut self, error: String, cx: &mut Context<Self>) {
+        self.show_toast(
+            format!("Could not add game automatically: {error}"),
+            true,
+            cx,
+        );
+    }
+    pub(crate) fn apply_discovered_game(
+        &mut self,
+        found: games::discovery::Discovered,
+        cx: &mut Context<Self>,
+    ) {
+        let (id, added) = match found {
+            games::discovery::Discovered::Existing(id) => (id, false),
+            games::discovery::Discovered::Added(game) => (game.catalog_id.unwrap_or(game.id), true),
+        };
+        let added = added && !self.games.iter().any(|g| g.id == id);
+        // Reload aliases without replacing running state or changing the open page.
+        {
+            let previous = std::mem::take(&mut self.games);
+            self.games = games::load_catalog();
+            for game in &mut self.games {
+                if let Some(old) = previous.iter().find(|g| g.id == game.id) {
+                    game.running = old.running;
+                    game.installed |= old.installed;
+                }
+            }
+        }
+        if let Err(error) = self.macro_engine.register_discovered_profile(&id) {
+            self.report_game_discovery_error(error, cx);
+            return;
+        }
+        self.macro_engine
+            .set_catalog(games::macro_targets(&self.games));
+        if let Some(game) = self.games.iter_mut().find(|g| g.id == id) {
+            game.running = true;
+            game.installed = true;
+        }
+        let running = self
+            .games
+            .iter()
+            .filter(|g| g.running)
+            .map(|g| g.id.clone())
+            .collect();
+        self.macro_engine.sync_games(running);
+        if added {
+            let art_id = id.clone();
+            cx.spawn(async move |view, cx| {
+                cx.background_executor()
+                    .spawn(async move {
+                        if let Some(game) =
+                            games::load_catalog().into_iter().find(|g| g.id == art_id)
+                        {
+                            if let Some(path) = game.executable_path {
+                                games::cache_executable_icon(&path);
+                            }
+                        }
+                        let _ = games::auto_cover(&art_id, false);
+                    })
+                    .await;
+                let _ = view.update(cx, |v, cx| v.refresh_game_art(cx));
+            })
+            .detach();
+            let name = self
+                .games
+                .iter()
+                .find(|g| g.id == id)
+                .map(|g| g.name.clone())
+                .unwrap_or_else(|| "Game".into());
+            self.show_toast(
+                format!("Added {name}. Its macro profile activates while focused."),
+                false,
+                cx,
+            );
+        }
+        cx.notify();
+    }
     pub fn refresh_game_art(&mut self, cx: &mut Context<Self>) {
         for fresh in games::load_catalog() {
             if let Some(game) = self.games.iter_mut().find(|g| g.id == fresh.id) {

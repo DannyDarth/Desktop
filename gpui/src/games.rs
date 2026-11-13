@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 
 #[path = "games/custom.rs"]
 pub mod custom;
+#[path = "games/discovery.rs"]
+pub mod discovery;
 #[path = "games/executable_icon.rs"]
 pub mod executable_icon;
 #[path = "games/profile_art.rs"]
@@ -191,6 +193,9 @@ struct GamesFile {
 /// Embedded catalog (`public/games.json` at build time).
 const GAMES_JSON: &str = include_str!("../../public/games.json");
 
+pub(super) fn bundled_catalog_id(steam_app_id:u32) -> Option<String> {
+    serde_json::from_str::<GamesFile>(GAMES_JSON).ok()?.games.into_iter().find(|g|g.steam_app_id==Some(steam_app_id)).map(|g|g.id)
+}
 /// Load the catalog; `installed` starts false until a scan completes.
 pub fn load_catalog() -> Vec<Game> {
     let mut games = match serde_json::from_str::<GamesFile>(GAMES_JSON) {
@@ -203,6 +208,12 @@ pub fn load_catalog() -> Vec<Game> {
     match custom::load() {
         Ok(entries) => {
             for e in entries {
+                if let Some(id)=&e.catalog_id {
+                    if let Some(game)=games.iter_mut().find(|g|&g.id==id) {
+                        game.executables.push(e.path.clone()); game.executables.extend(e.aliases);
+                        continue;
+                    }
+                }
                 let executable = e
                     .path
                     .rsplit(['\\', '/'])
@@ -215,10 +226,10 @@ pub fn load_catalog() -> Vec<Game> {
                     name: e.name,
                     artwork: None,
                     profile_image: None,
-                    steam_app_id: None,
+                    steam_app_id: e.steam_app_id,
                     epic_id: None,
                     riot_id: None,
-                    executables: vec![executable],
+                    executables: std::iter::once(executable).chain(e.aliases).collect(),
                     executable_path: Some(e.path),
                     installed,
                     running: false,
@@ -240,10 +251,12 @@ pub fn load_catalog() -> Vec<Game> {
 pub fn macro_targets(games: &[Game]) -> Vec<crate::macros::GameTarget> {
     games
         .iter()
-        .map(|g| crate::macros::GameTarget {
-            id: g.id.clone(),
-            executables: g.executables.clone(),
-            path: g.executable_path.clone(),
+        .flat_map(|g| {
+            let mut targets=vec![crate::macros::GameTarget {id:g.id.clone(),executables:g.executables.clone(),path:g.executable_path.clone()}];
+            for path in &g.executables {
+                if path.contains(['\\','/']) {targets.push(crate::macros::GameTarget {id:g.id.clone(),executables:Vec::new(),path:Some(path.clone())});}
+            }
+            targets
         })
         .collect()
 }

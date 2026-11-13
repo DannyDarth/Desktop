@@ -187,8 +187,16 @@ pub struct Library {
     pub macros: Vec<Macro>,
     #[serde(default)]
     pub focus_only: HashSet<String>,
+    #[serde(default)]
+    pub discovered_profiles: HashSet<String>,
 }
 impl Library {
+    pub fn register_discovered_profile(&mut self, id: &str) {
+        if self.discovered_profiles.insert(id.into()) && !self.macros.iter().any(|m| m.game_id.as_deref() == Some(id)) {
+            self.focus_only.insert(id.into());
+        }
+    }
+
     /// The delay belongs to its event and travels with it. Playback validation
     /// rejects a release before its press or overlapping duplicate presses.
     pub fn move_step(&mut self, macro_index: usize, from: usize, to: usize) -> Result<(), String> {
@@ -230,6 +238,7 @@ impl Library {
         };
         Library {
             focus_only: HashSet::new(),
+            discovered_profiles: HashSet::new(),
             enabled: false,
             macros: vec![m.clone()],
         }
@@ -465,6 +474,16 @@ impl Engine {
     pub fn set_catalog(&self, catalog: Vec<GameTarget>) {
         *self.catalog.lock().unwrap() = catalog;
     }
+    /// Persist discovery once without interrupting a recording or playback.
+    pub fn register_discovered_profile(&self, id: &str) -> Result<bool, String> {
+        let mut state = self.state.lock().unwrap();
+        if state.snapshot.library.discovered_profiles.contains(id) { return Ok(false); }
+        let mut library = state.snapshot.library.clone();
+        library.register_discovered_profile(id);
+        self.save(&library)?;
+        state.snapshot.library = library;
+        Ok(true)
+    }
     pub fn snapshot(&self) -> Snapshot {
         let state = self.state.lock().unwrap();
         let mut snapshot = state.snapshot.clone();
@@ -694,6 +713,7 @@ mod tests {
     fn library(steps: Vec<Step>) -> Library {
         Library {
             focus_only: HashSet::new(),
+            discovered_profiles: HashSet::new(),
             enabled: false,
             macros: vec![Macro {
                 mode: MacroMode::Count,
@@ -758,6 +778,7 @@ mod tests {
                 snapshot: Snapshot {
                     library: Library {
                         focus_only: HashSet::new(),
+            discovered_profiles: HashSet::new(),
                         enabled: true,
                         macros: vec![],
                     },

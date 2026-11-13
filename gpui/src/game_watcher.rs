@@ -22,6 +22,7 @@ const INSTALL_INTERVAL_INACTIVE: Duration = Duration::from_secs(60);
 pub(crate) struct GameWatcher {
     _processes: Task<()>,
     _installations: Task<()>,
+    _discovery: Task<()>,
 }
 
 impl GameWatcher {
@@ -90,9 +91,48 @@ impl GameWatcher {
                     .await;
             }
         });
+        let discovery = cx.spawn(async move |view, cx| {
+            if !cfg!(windows) {
+                return;
+            }
+            let mut seen = std::collections::HashSet::new();
+            loop {
+                let result = cx
+                    .background_executor()
+                    .spawn(async {
+                        let path = games::discovery::foreground_executable();
+                        path
+                    })
+                    .await;
+                if let Some(path) = result {
+                    let key = path.replace('\\', "/").to_ascii_lowercase();
+                    if seen.insert(key) {
+                        let result = cx
+                            .background_executor()
+                            .spawn(async move { games::discovery::discover(&path) })
+                            .await;
+                        if view
+                            .update(cx, |v, cx| match result {
+                                Ok(Some(found)) => v.apply_discovered_game(found, cx),
+                                Err(error) => v.report_game_discovery_error(error, cx),
+                                _ => {}
+                            })
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                }
+                if view.update(cx, |_, _| ()).is_err() {
+                    break;
+                }
+                cx.background_executor().timer(Duration::from_secs(2)).await;
+            }
+        });
         Self {
             _processes: processes,
             _installations: installations,
+            _discovery: discovery,
         }
     }
 }
@@ -137,6 +177,26 @@ impl RunningTracker {
     }
 
     fn poll(&mut self) -> Vec<GameUpdate> {
+        let catalog = games::load_catalog();
+        if catalog
+            .iter()
+            .map(|g| &g.id)
+            .ne(self.matches.game_ids.iter())
+            || catalog.iter().any(|g| {
+                g.executables
+                    .iter()
+                    .filter(|e| e.contains(['\\', '/']))
+                    .any(|p| {
+                        !self
+                            .matches
+                            .paths
+                            .iter()
+                            .any(|(old, _)| crate::macros::paths_match(old, p))
+                    })
+            })
+        {
+            self.matches = ProcessMatches::new(catalog, cfg!(target_os = "macos"));
+        }
         // Retain System and refresh just executable identity, not CPU, memory,
         // command lines or Linux threads. Remove exited processes on every poll.
         self.system.refresh_processes_specifics(
@@ -190,6 +250,10 @@ impl ProcessMatches {
                 paths.push((path.clone(), index));
             }
             for executable in game.executables {
+                if executable.contains(['\\', '/']) {
+                    paths.push((executable, index));
+                    continue;
+                }
                 if game.executable_path.is_some() {
                     continue;
                 }

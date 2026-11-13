@@ -455,3 +455,11 @@ fn artwork_matches_the_executable_installation_not_a_similar_name() {
     let wrong = f.file("library/steamapps/common/Helldivers 2 Mod/game.exe", "exe");
     assert_eq!(steam_app_for_executable(&wrong.to_string_lossy()), None);
 }
+
+#[test]
+fn discovery_reads_a_steam_title_from_its_manifest() {
+    let f=Fixture::new();
+    f.file("library/steamapps/appmanifest_4294967000.acf",r#""AppState" { "appid" "4294967000" "name" "My New Game" "installdir" "NewGame" "StateFlags" "4" }"#);
+    let exe=f.file("library/steamapps/common/NewGame/bin/Game.exe","fixture");
+    assert_eq!(steam_title_for_executable(&exe.to_string_lossy()),Some((4294967000,"My New Game".into())));
+}

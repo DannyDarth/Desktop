@@ -6,6 +6,14 @@ pub struct CustomGame {
     pub id: String,
     pub name: String,
     pub path: String,
+    #[serde(default)]
+    pub auto_discovered: bool,
+    #[serde(default)]
+    pub steam_app_id: Option<u32>,
+    #[serde(default)]
+    pub aliases: Vec<String>,
+    #[serde(default)]
+    pub catalog_id: Option<String>,
 }
 fn config_path() -> Result<PathBuf, String> {
     dirs::config_dir()
@@ -29,16 +37,37 @@ fn load_from(path: &Path) -> Result<Vec<CustomGame>, String> {
                 || e.name.is_empty()
                 || e.name.chars().count() > 100
                 || !e.path.to_ascii_lowercase().ends_with(".exe")
+                || e.aliases.len() > 32
+                || e.aliases
+                    .iter()
+                    .any(|p| !p.to_ascii_lowercase().ends_with(".exe"))
         })
     {
         return Err("The custom games file contains invalid entries.".into());
     }
     Ok(entries)
 }
+static WRITER: std::sync::Mutex<()> = std::sync::Mutex::new(());
 pub fn add(path: &Path) -> Result<CustomGame, String> {
+    let _writer = WRITER.lock().map_err(|_| "Game storage is unavailable.")?;
     add_to(&config_path()?, path)
 }
+pub fn add_discovered(
+    path: &Path,
+    name: &str,
+    steam_app_id: Option<u32>,
+) -> Result<CustomGame, String> {
+    let _writer = WRITER.lock().map_err(|_| "Game storage is unavailable.")?;
+    add_to_named(&config_path()?, path, Some((name, steam_app_id)))
+}
 fn add_to(config: &Path, selected: &Path) -> Result<CustomGame, String> {
+    add_to_named(config, selected, None)
+}
+fn add_to_named(
+    config: &Path,
+    selected: &Path,
+    discovered: Option<(&str, Option<u32>)>,
+) -> Result<CustomGame, String> {
     if !selected.is_file() {
         return Err("Choose the game's executable file.".into());
     }
@@ -53,11 +82,32 @@ fn add_to(config: &Path, selected: &Path) -> Result<CustomGame, String> {
         .to_string_lossy()
         .to_string();
     let mut entries = load_from(config)?;
-    if let Some(existing) = entries
-        .iter()
-        .find(|e| crate::macros::paths_match(&e.path, &path))
-    {
+    if let Some(existing) = entries.iter().find(|e| {
+        crate::macros::paths_match(&e.path, &path)
+            || e.aliases
+                .iter()
+                .any(|p| crate::macros::paths_match(p, &path))
+    }) {
         return Ok(existing.clone());
+    }
+    if let Some((_, Some(app))) = discovered {
+        if let Some(index) = entries
+            .iter()
+            .position(|e| e.auto_discovered && e.steam_app_id == Some(app))
+        {
+            if !entries[index]
+                .aliases
+                .iter()
+                .any(|p| crate::macros::paths_match(p, &path))
+            {
+                if entries[index].aliases.len() >= 32 {
+                    return Err("Too many executables for this game.".into());
+                }
+                entries[index].aliases.push(path);
+                save(config, &entries)?;
+            }
+            return Ok(entries[index].clone());
+        }
     }
     if entries.len() >= 256 {
         return Err("At most 256 custom games are supported.".into());
@@ -66,7 +116,12 @@ fn add_to(config: &Path, selected: &Path) -> Result<CustomGame, String> {
         .file_stem()
         .and_then(|s| s.to_str())
         .ok_or("The executable name is not readable.")?;
-    let name: String = stem.replace(['_', '-'], " ").chars().take(100).collect();
+    let mut name: String = stem.replace(['_', '-'], " ").chars().take(100).collect();
+    if let Some((title, _)) = discovered {
+        if !title.trim().is_empty() {
+            name = title.trim().chars().take(100).collect();
+        }
+    }
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|e| e.to_string())?
@@ -75,6 +130,12 @@ fn add_to(config: &Path, selected: &Path) -> Result<CustomGame, String> {
         id: format!("custom:{stamp:x}-{:x}", std::process::id()),
         name,
         path,
+        auto_discovered: discovered.is_some(),
+        steam_app_id: discovered.and_then(|(_, id)| id),
+        aliases: Vec::new(),
+        catalog_id: discovered
+            .and_then(|(_, id)| id)
+            .and_then(|id| super::bundled_catalog_id(id)),
     };
     entries.push(entry.clone());
     save(config, &entries)?;
@@ -139,5 +200,58 @@ mod tests {
         assert!(add_to(&config, &exe).is_err());
         assert_eq!(std::fs::read(&config).unwrap(), b"broken");
         std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod discovery_tests {
+    use super::*;
+    #[test]
+    fn discovery_reuses_persisted_identity_and_steam_executable_variants() {
+        let root = std::env::temp_dir().join(format!(
+            "openmouse-discovery-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let first = root.join("Game.exe");
+        let second = root.join("GameDX12.exe");
+        std::fs::write(&first, b"fixture").unwrap();
+        std::fs::write(&second, b"fixture").unwrap();
+        let config = root.join("games.json");
+        let original =
+            add_to_named(&config, &first, Some(("Test title", Some(4294967000)))).unwrap();
+        let again =
+            add_to_named(&config, &first, Some(("Different title", Some(4294967000)))).unwrap();
+        let variant =
+            add_to_named(&config, &second, Some(("Test title", Some(4294967000)))).unwrap();
+        assert_eq!(original.id, again.id);
+        assert_eq!(original.id, variant.id);
+        assert_eq!(load_from(&config).unwrap().len(), 1);
+        assert_eq!(variant.aliases.len(), 1);
+        assert_eq!(add_to(&config, &second).unwrap().id, original.id);
+        assert_eq!(variant.name, "Test title");
+        assert!(variant.auto_discovered);
+        assert_eq!(
+            add_to_named(&config, &second, Some(("Test title", Some(4294967000))))
+                .unwrap()
+                .aliases
+                .len(),
+            1
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn old_records_are_manual_and_discovery_does_not_overwrite_them() {
+        let old: CustomGame = serde_json::from_str(
+            r#"{"id":"custom:old","name":"My title","path":"C:\\Games\\Game.exe"}"#,
+        )
+        .unwrap();
+        assert!(!old.auto_discovered);
+        assert!(old.aliases.is_empty());
+        assert!(old.catalog_id.is_none());
     }
 }
