@@ -468,6 +468,7 @@ pub struct AppView {
     macro_engine: crate::macros::Engine,
     macro_scope: Option<String>,
     macro_last_active: Option<String>,
+    macro_text_edit: Option<macros_view::MacroTextEdit>,
     macro_selected: Option<usize>,
     games: Vec<Game>,
     devices: Devices,
@@ -617,6 +618,7 @@ impl AppView {
             macro_engine: crate::macros::Engine::load(),
             macro_scope: None,
             macro_last_active: None,
+            macro_text_edit: None,
             macro_selected: None,
             sidebar_collapsed: false,
             settings,
@@ -663,7 +665,7 @@ impl AppView {
                 if view.update(cx, |v, cx| {
                     let active = v.macro_engine.snapshot().active_game;
                     if active != v.macro_last_active {
-                        v.macro_last_active = active.clone(); v.macro_scope = active; v.macro_selected = None; cx.notify();
+                        v.macro_last_active = active.clone(); v.macro_scope = active; v.macro_selected = None; v.macro_text_edit = None; cx.notify();
                     }
                     if v.page == Page::Macros { cx.notify(); }
                 }).is_err() { break; }
@@ -690,6 +692,7 @@ impl Default for AppView {
             macro_engine: crate::macros::Engine::load(),
             macro_scope: None,
             macro_last_active: None,
+            macro_text_edit: None,
             macro_selected: None,
             sidebar_collapsed: false,
             settings: Settings::default(),

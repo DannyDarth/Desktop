@@ -152,3 +152,15 @@ existing profiles and retains their behavior when alt-tabbing. This controls
 macro sets; existing device DPI/onboard game profiles keep their existing
 process-based switching. Game detection still uses the current executable
 catalog; custom executable selection is not included in this change.
+
+## Editing names and exact delays
+
+Choose **Rename** beside the selected macro's title to edit its name. Names are
+trimmed and must contain 1 to 100 characters. Click an event's **ms** value to
+enter an exact whole-number delay from 0 to 60000 milliseconds. The minus/plus
+buttons remain available for 10 ms adjustments.
+
+Press Enter or click away to save either edit. Escape cancels it. Invalid input
+shows an inline error and does not replace the saved value. Typing in a delay
+field does not start a row drag. Delay edits apply to the selected Sequence
+section when using Sequence mode.

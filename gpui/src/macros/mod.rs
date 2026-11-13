@@ -243,7 +243,7 @@ impl Library {
         let mut triggers = Vec::new();
         for m in &self.macros {
             if m.name.is_empty()
-                || m.name.len() > 100
+                || m.name.chars().count() > 100
                 || !(1..=100).contains(&m.repeats)
                 || m.on_press.len() + m.steps.len() + m.on_release.len() > 1000
             {
@@ -288,6 +288,23 @@ impl Library {
         }
         Ok(())
     }
+}
+pub fn parse_delay_ms(text: &str) -> Result<u32, String> {
+    let text = text.trim();
+    if text.is_empty() || !text.bytes().all(|c| c.is_ascii_digit()) {
+        return Err("Enter a whole number from 0 to 60000.".into());
+    }
+    text.parse::<u32>()
+        .ok()
+        .filter(|v| *v <= 60_000)
+        .ok_or_else(|| "Enter a whole number from 0 to 60000.".into())
+}
+pub fn parse_macro_name(text: &str) -> Result<String, String> {
+    let name = text.trim();
+    if name.is_empty() || name.chars().count() > 100 {
+        return Err("Use a name of 1 to 100 characters.".into());
+    }
+    Ok(name.to_string())
 }
 pub fn recordable_key(code: u16) -> bool {
     (0x08..=0xfe).contains(&code) && !matches!(code, 0x10..=0x12 | 0x1b | 0x77 | 0xe7)
@@ -997,5 +1014,21 @@ mod tests {
         let reopened: Library = serde_json::from_str(&serde_json::to_string(&l).unwrap()).unwrap();
         assert!(reopened.focus_only.contains("game"));
         assert!(!reopened.focus_only.contains("other"));
+    }
+    #[test]
+    fn typed_delay_accepts_exact_values_and_rejects_invalid_input() {
+        assert_eq!(parse_delay_ms(" 1963 "), Ok(1963));
+        assert_eq!(parse_delay_ms("0"), Ok(0));
+        assert_eq!(parse_delay_ms("60000"), Ok(60_000));
+        for invalid in ["", "-1", "1.5", "1963 ms", "60001", "999999999999999"] {
+            assert!(parse_delay_ms(invalid).is_err());
+        }
+    }
+    #[test]
+    fn macro_names_are_trimmed_and_cannot_be_blank_or_too_long() {
+        assert_eq!(parse_macro_name("  Reload  "), Ok("Reload".into()));
+        assert!(parse_macro_name("  ").is_err());
+        assert!(parse_macro_name(&"x".repeat(101)).is_err());
+        assert!(parse_macro_name(&"é".repeat(100)).is_ok());
     }
 }

@@ -1,6 +1,24 @@
 use super::*;
 use crate::macros::{Macro, MacroMode, Section, Trigger};
+use gpui_kit::component::input::{Input, InputEvent, InputState};
 
+enum TextEditTarget {
+    Name {
+        original: String,
+    },
+    Delay {
+        section: Section,
+        step: usize,
+        original: std::sync::Arc<[crate::macros::Step]>,
+    },
+}
+pub(super) struct MacroTextEdit {
+    macro_index: usize,
+    target: TextEditTarget,
+    input: Entity<InputState>,
+    error: Option<String>,
+    _subscription: Subscription,
+}
 #[derive(Clone)]
 struct MacroStepDrag {
     owner: EntityId,
@@ -25,6 +43,119 @@ impl Render for MacroStepDrag {
 }
 
 impl AppView {
+    fn begin_macro_text_edit(
+        &mut self,
+        index: usize,
+        target: TextEditTarget,
+        value: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let state = self.macro_engine.snapshot();
+        if state.playing || state.recording.is_some() || state.assigning.is_some() {
+            return;
+        }
+        let input = cx.new(|cx| InputState::new(window, cx).default_value(value));
+        let subscription = cx.subscribe(&input, |this, _, event: &InputEvent, cx| match event {
+            InputEvent::PressEnter { .. } | InputEvent::Blur => this.commit_macro_text_edit(cx),
+            InputEvent::Change => {
+                if let Some(edit) = this.macro_text_edit.as_mut() {
+                    edit.error = None;
+                }
+                cx.notify();
+            }
+            _ => {}
+        });
+        self.macro_text_edit = Some(MacroTextEdit {
+            macro_index: index,
+            target,
+            input: input.clone(),
+            error: None,
+            _subscription: subscription,
+        });
+        input.update(cx, |input, cx| {
+            input.focus(window, cx);
+            input.select_all(window, cx);
+        });
+        cx.notify();
+    }
+    fn commit_macro_text_edit(&mut self, cx: &mut Context<Self>) {
+        let Some(mut edit) = self.macro_text_edit.take() else {
+            return;
+        };
+        let text = edit.input.read(cx).value().to_string();
+        let state = self.macro_engine.snapshot();
+        let result = (|| -> Result<(), String> {
+            if state.playing || state.recording.is_some() || state.assigning.is_some() {
+                return Err("Stop playback or recording before editing.".into());
+            }
+            let m = state
+                .library
+                .macros
+                .get(edit.macro_index)
+                .ok_or("Macro no longer exists.")?;
+            match &edit.target {
+                TextEditTarget::Name { original } => {
+                    if m.name != *original {
+                        return Err("The name changed. Cancel and try again.".into());
+                    }
+                    let name = crate::macros::parse_macro_name(&text)?;
+                    self.macro_engine
+                        .edit(|l| l.macros[edit.macro_index].name = name);
+                }
+                TextEditTarget::Delay {
+                    section,
+                    step,
+                    original,
+                } => {
+                    if m.section(*section) != original.as_ref() {
+                        return Err("The steps changed. Cancel and try again.".into());
+                    }
+                    let value = crate::macros::parse_delay_ms(&text)?;
+                    self.macro_engine.edit(|l| {
+                        l.macros[edit.macro_index].section_mut(*section)[*step].delay_ms = value
+                    });
+                }
+            }
+            Ok(())
+        })();
+        if let Err(error) = result {
+            edit.error = Some(error);
+            self.macro_text_edit = Some(edit);
+        }
+        cx.notify();
+    }
+    fn render_macro_text_edit(
+        &self,
+        label: &'static str,
+        width: f32,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some(edit) = &self.macro_text_edit else {
+            return div().into_any_element();
+        };
+        div()
+            .id("macro-text-edit")
+            .flex()
+            .flex_col()
+            .gap_1()
+            .w(px(width))
+            .capture_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                if event.keystroke.key == "escape" {
+                    this.macro_text_edit = None;
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+            }))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(Input::new(&edit.input).small().aria_label(label))
+            .children(
+                edit.error
+                    .clone()
+                    .map(|error| div().text_xs().text_color(cx.theme().danger).child(error)),
+            )
+            .into_any_element()
+    }
     fn macro_drop_zone(
         &self,
         macro_index: usize,
@@ -217,13 +348,46 @@ impl AppView {
             };
             let steps = m.section(section);
             let playback_error = state.library.playback_error(i);
+            let editing_name = self.macro_text_edit.as_ref().is_some_and(|e| {
+                e.macro_index == i && matches!(e.target, TextEditTarget::Name { .. })
+            });
+            let heading = if editing_name {
+                self.render_macro_text_edit("Macro name", 300., cx)
+            } else {
+                h_flex()
+                    .gap_3()
+                    .items_center()
+                    .child(
+                        div()
+                            .text_base()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(m.name.clone()),
+                    )
+                    .child(
+                        Button::new("macro-rename")
+                            .ghost()
+                            .compact()
+                            .label("Rename")
+                            .disabled(busy)
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                let state = this.macro_engine.snapshot();
+                                if let Some(m) = state.library.macros.get(i) {
+                                    this.begin_macro_text_edit(
+                                        i,
+                                        TextEditTarget::Name {
+                                            original: m.name.clone(),
+                                        },
+                                        m.name.clone(),
+                                        window,
+                                        cx,
+                                    );
+                                }
+                            })),
+                    )
+                    .into_any_element()
+            };
             editor = editor
-                .child(
-                    div()
-                        .text_base()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child(m.name.clone()),
-                )
+                .child(heading)
                 .child(
                     h_flex()
                         .gap_2()
@@ -447,6 +611,39 @@ impl AppView {
                 let mut rows = div().flex().flex_col();
                 for (j, step) in steps.iter().enumerate() {
                     rows = rows.child(self.macro_drop_zone(i, j, section, steps.len(), busy, cx));
+                    let editing_delay = self.macro_text_edit.as_ref().is_some_and(|e| e.macro_index == i && matches!(e.target, TextEditTarget::Delay { section: phase, step, .. } if phase == section && step == j));
+                    let delay_control = if editing_delay {
+                        self.render_macro_text_edit("Delay in milliseconds", 160., cx)
+                    } else {
+                        Button::new(SharedString::from(format!("macro-delay-value-{j}")))
+                            .ghost()
+                            .compact()
+                            .label(format!("{} ms", step.delay_ms))
+                            .tooltip("Click to type a delay")
+                            .disabled(busy)
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                let state = this.macro_engine.snapshot();
+                                if let Some(m) = state.library.macros.get(i) {
+                                    let original: std::sync::Arc<[crate::macros::Step]> =
+                                        m.section(section).to_vec().into();
+                                    if let Some(step) = original.get(j) {
+                                        let value = step.delay_ms.to_string();
+                                        this.begin_macro_text_edit(
+                                            i,
+                                            TextEditTarget::Delay {
+                                                section,
+                                                step: j,
+                                                original,
+                                            },
+                                            value,
+                                            window,
+                                            cx,
+                                        );
+                                    }
+                                }
+                            }))
+                            .into_any_element()
+                    };
                     let payload = MacroStepDrag {
                         owner: cx.entity_id(),
                         macro_index: i,
@@ -466,7 +663,7 @@ impl AppView {
                             .border_1()
                             .border_color(cx.theme().border)
                             .rounded(cx.theme().radius)
-                            .when(!busy, |row| {
+                            .when(!busy && !editing_delay, |row| {
                                 row.cursor_grab().on_drag(payload, |drag, _, _, cx| {
                                     cx.stop_propagation();
                                     cx.new(|_| drag.clone())
@@ -504,12 +701,7 @@ impl AppView {
                                         cx.notify();
                                     })),
                             )
-                            .child(
-                                div()
-                                    .w(px(75.))
-                                    .text_sm()
-                                    .child(format!("{} ms", step.delay_ms)),
-                            )
+                            .child(delay_control)
                             .child(
                                 Button::new(SharedString::from(format!("macro-delay-more-{j}")))
                                     .compact()
