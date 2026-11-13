@@ -1,3 +1,5 @@
+import { LogitechKeyboardHidClient } from "@openmouse/keyboard-protocol/drivers/logitech/hid";
+import { LOGITECH_KEYBOARD_PRODUCTS, LOGITECH_VENDOR_ID } from "@openmouse/keyboard-protocol/logitech";
 // Which drivers can drive a device, and which collection they talk on, come
 // from `@openmouse/protocol` itself — its `DEVICE_DRIVERS` registry
 // (brand, supports, create, score) and its `SUPPORTED_HID_FILTERS`.
@@ -27,6 +29,7 @@ export interface SupportedClient {
 export interface BrandedCandidate {
   /** The brand the registry attributes this driver to. */
   brand: string;
+  kind?: "keyboard";
   /** Builds the driver for a device — the registry's own `create`. */
   create: (device: HIDDevice) => SupportedClient | null;
   /** The registry's confidence that this driver fits, highest wins. */
@@ -133,6 +136,20 @@ export function candidatesForVendorId(vendorId: number, productId: number): Bran
  */
 export function candidatesForDevice(info: HidInterfaceInfo): BrandedCandidate[] {
   const all = candidatesForVendorId(info.vendorId, info.productId);
+  const keyboardProbe = new TauriHidDevice(info, { usagePage: 0xff00, usage: 1 });
+  if (LogitechKeyboardHidClient.isSupported(keyboardProbe)) {
+    const keyboard: BrandedCandidate = {
+      brand: "Logitech", kind: "keyboard",
+      create: device => new LogitechKeyboardHidClient(device) as unknown as SupportedClient,
+      supports: device => LogitechKeyboardHidClient.isSupported(device),
+      score: () => 0,
+      preferredCollection: { usagePage: 0xff00, usage: 1 },
+    };
+    // Direct keyboard IDs must never be opened with a mouse driver. Receivers
+    // can pair either type, so retain the mouse probe before keyboard discovery.
+    if (info.vendorId === LOGITECH_VENDOR_ID && LOGITECH_KEYBOARD_PRODUCTS.has(info.productId)) return [keyboard];
+    all.push(keyboard);
+  }
   // A driver whose predicate throws is one that cannot drive this device.
   const probe = new TauriHidDevice(info, all[0]?.preferredCollection);
   const claimed = all.filter((candidate) => {

@@ -16,6 +16,7 @@ fn main() {
     println!("cargo:rerun-if-changed=js/shims");
     println!("cargo:rerun-if-changed=js/lib");
     println!("cargo:rerun-if-changed=../node_modules/@openmouse/protocol/dist");
+    println!("cargo:rerun-if-changed=../node_modules/@openmouse/keyboard-protocol/dist");
 
     if !Path::new("../node_modules/esbuild").exists() {
         panic!("gpui: run `npm install` in the repo root first (esbuild builds the embedded protocol bundle)");

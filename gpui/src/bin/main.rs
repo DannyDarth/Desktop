@@ -115,10 +115,10 @@ fn main() {
             cx.spawn(async move |cx| {
                 let games = cx.background_executor().spawn(async {
                     let games = openmouse_gpui::games::load_catalog();
-                    for game in &games { if let Some(path) = &game.executable_path { openmouse_gpui::games::cache_executable_icon(path); } }
+                    for game in &games { if let Some(path) = &game.executable_path { openmouse_gpui::games::cache_executable_icon(path); let _ = openmouse_gpui::games::auto_cover(&game.id, false); } }
                     games
                 }).await;
-                let _ = view_weak.update(cx, |_, cx| cx.notify());
+                let _ = view_weak.update(cx, |v, cx| v.refresh_game_art(cx));
                 cx.background_executor().spawn(async move { openmouse_gpui::games::prefetch_art(&games); }).await;
                 let _ = view_weak.update(cx, |_, cx| {
                     cx.notify();

@@ -312,6 +312,7 @@ mod tests {
     fn game(id: &str, executable: &str) -> Game {
         Game {
             executable_path: None,
+            profile_image: None,
             id: id.into(),
             name: format!("Name {id}"),
             artwork: Some(format!("https://example.com/{id}.jpg")),

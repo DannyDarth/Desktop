@@ -390,6 +390,7 @@ struct DeviceReadout {
     /// The driver's own UI hints (`MouseUiHints`): what is meaningful for this
     /// protocol generation.
     polling_read_only: bool,
+    keyboard: bool,
     hide_lod_low: bool,
     lod_requires_surface: bool,
     /// A Logitech mouse with stored profiles the library can read.
@@ -424,6 +425,7 @@ impl DeviceReadout {
             dpi_y: num("dpiY"),
             separate_axes: s.get("supportsSeparateDpiAxes").and_then(|v| v.as_bool()).unwrap_or(false),
             polling_read_only: ui_flag("pollingReadOnly"),
+            keyboard: s.get("logitech").is_some() && s.get("ui").and_then(|u| u.get("settingsReady")).and_then(|v| v.as_bool()) == Some(false),
             hide_lod_low: ui_flag("hideLodLow"),
             lod_requires_surface: ui_flag("lodRequiresSurface"),
             onboard_profiles: s
@@ -470,6 +472,7 @@ pub struct AppView {
     macro_scope: Option<String>,
     macro_last_active: Option<String>,
     macro_text_edit: Option<macros_view::MacroTextEdit>,
+    game_art_busy: bool,
     macro_selected: Option<usize>,
     games: Vec<Game>,
     devices: Devices,
@@ -620,6 +623,7 @@ impl AppView {
             macro_scope: None,
             macro_last_active: None,
             macro_text_edit: None,
+            game_art_busy: false,
             macro_selected: None,
             sidebar_collapsed: false,
             settings,
@@ -691,6 +695,7 @@ impl Default for AppView {
             macro_scope: None,
             macro_last_active: None,
             macro_text_edit: None,
+            game_art_busy: false,
             macro_selected: None,
             sidebar_collapsed: false,
             settings: Settings::default(),
@@ -3077,6 +3082,11 @@ impl AppView {
         };
 
         let content: AnyElement = match &tile.status {
+            TileStatus::Connected(r) if r.keyboard => div().flex().flex_col().gap_3()
+                .child(div().text_lg().child("Keyboard connected"))
+                .child(div().text_sm().text_color(muted).child("Create and assign keyboard macros in Macros. Device lighting and onboard keyboard settings are not available in this build."))
+                .children(r.firmware.iter().map(|line| div().text_sm().child(line.clone())))
+                .into_any_element(),
             TileStatus::Connected(r) if self.devices.tab != DeviceTab::Performance => self.render_extra_tab(r, cx),
             TileStatus::Connected(r) => {
                 let mut col = div().flex().flex_col().gap_3().flex_1().min_w_0().max_w(px(720.));
@@ -3748,6 +3758,7 @@ impl AppView {
                     .child(div().text_xl().font_weight(FontWeight::SEMIBOLD).text_color(fg).child(name))
                     .child(div().text_sm().text_color(muted).child("Device profile")),
             )
+            .child(self.render_game_art_actions(game_id, cx))
             .child(Button::new("game-macros").label("Macros").on_click(cx.listener(move |this, _, _, cx| { this.macro_scope = Some(macro_game.clone()); this.macro_selected = None; this.page = Page::Macros; cx.notify(); })));
 
         // Device picker: one chip per device. A device that isn't connected yet is
@@ -4117,7 +4128,7 @@ impl AppView {
         // Remote `img(url)` is not used: desktop GPUI ships no HTTP client
         // (`with_http_client` is web-backend-only), so URLs would stay blank.
         let art = match crate::games::cached_art_path(game) {
-            Some(path) if game.executable_path.is_some() => div().w_full().h(px(ART_H)).flex().items_center().justify_center()
+            Some(path) if games::uses_executable_icon(game) => div().w_full().h(px(ART_H)).flex().items_center().justify_center()
                 .bg(Hsla { a: 0.06, ..accent }).child(img(path).size(px(96.)).object_fit(ObjectFit::Contain)).into_any_element(),
             Some(path) => div()
                 .w_full()

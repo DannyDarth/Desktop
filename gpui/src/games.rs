@@ -7,8 +7,13 @@
 
 use serde::{Deserialize, Serialize};
 
+#[path = "games/custom.rs"]
 pub mod custom;
+#[path = "games/executable_icon.rs"]
 pub mod executable_icon;
+#[path = "games/profile_art.rs"]
+pub mod profile_art;
+#[path = "games/install_scan.rs"]
 mod install_scan;
 
 /// One catalog entry, mirroring the TS `Game` interface.
@@ -28,6 +33,7 @@ pub struct Game {
     pub executables: Vec<String>,
     #[serde(default)]
     pub executable_path: Option<String>,
+    #[serde(default)] pub profile_image: Option<String>,
     #[serde(skip)]
     pub installed: bool,
     #[serde(skip)]
@@ -87,6 +93,7 @@ pub fn art_cache_dir() -> Option<std::path::PathBuf> {
 fn art_cache_path(dir: &std::path::Path, game: &Game) -> std::path::PathBuf {
     use std::hash::{Hash, Hasher};
     if let Some(executable) = &game.executable_path {
+        if let Some(id) = game.steam_app_id { return dir.join(format!("steam-cover-{id}.png")); }
         return executable_icon::cache_path(dir, executable);
     }
     match game.artwork.as_deref() {
@@ -101,8 +108,11 @@ fn art_cache_path(dir: &std::path::Path, game: &Game) -> std::path::PathBuf {
 
 /// Local art file for a game, if already prefetched.
 pub fn cached_art_path(game: &Game) -> Option<std::path::PathBuf> {
-    let path = art_cache_path(&art_cache_dir()?, game);
-    path.is_file().then_some(path)
+    if let Some(file) = &game.profile_image { let path = std::path::PathBuf::from(file); if path.is_file() { return Some(path); } }
+    let dir = art_cache_dir()?;
+    let path = art_cache_path(&dir, game);
+    if path.is_file() { return Some(path); }
+    game.executable_path.as_ref().map(|exe| executable_icon::cache_path(&dir, exe)).filter(|p| p.is_file())
 }
 
 pub fn cache_executable_icon(executable: &str) {
@@ -110,6 +120,24 @@ pub fn cache_executable_icon(executable: &str) {
         let target = executable_icon::cache_path(&dir, executable);
         executable_icon::extract(executable, &target);
     }
+}
+
+pub fn auto_cover(id: &str, force: bool) -> Result<(), String> {
+    let preferences = profile_art::load()?;
+    let choice = preferences.get(id).cloned().unwrap_or_default();
+    if !force && choice.image_file.is_some() { return Ok(()); }
+    if !force && choice.checked && choice.steam_app_id.is_none() { return Ok(()); }
+    let game = load_catalog().into_iter().find(|g| g.id == id).ok_or("Game no longer exists.")?;
+    let app_id = choice.steam_app_id.or(game.steam_app_id).or_else(|| game.executable_path.as_deref().and_then(install_scan::steam_app_for_executable));
+    let Some(app_id) = app_id else { profile_art::record_lookup(id, None, false)?; return Err("No matching Steam installation was found. Use Choose image.".into()); };
+    profile_art::record_lookup(id, Some(app_id), false)?;
+    profile_art::download_cover(app_id, &art_cache_dir().ok_or("No artwork folder is available.")?)?;
+    profile_art::record_lookup(id, Some(app_id), force)
+}
+pub fn uses_executable_icon(game: &Game) -> bool {
+    let Some(path) = cached_art_path(game) else { return false; };
+    let Some(exe) = &game.executable_path else { return false; };
+    art_cache_dir().is_some_and(|dir| path == executable_icon::cache_path(&dir, exe))
 }
 
 /// Download missing art for all games with a resolvable URL. Blocking;
@@ -126,6 +154,11 @@ pub fn prefetch_art(games: &[Game]) {
         }
     }
     for game in games {
+        if game.profile_image.is_some() { continue; }
+        if game.executable_path.is_some() {
+            if let Some(id) = game.steam_app_id { let _ = profile_art::download_cover(id, &dir); }
+            continue;
+        }
         let Some(url) = game.art_url() else { continue };
         let target = art_cache_path(&dir, game);
         if target.is_file() {
@@ -181,6 +214,7 @@ pub fn load_catalog() -> Vec<Game> {
                     id: e.id,
                     name: e.name,
                     artwork: None,
+                    profile_image: None,
                     steam_app_id: None,
                     epic_id: None,
                     riot_id: None,
@@ -192,6 +226,14 @@ pub fn load_catalog() -> Vec<Game> {
             }
         }
         Err(e) => eprintln!("{e}"),
+    }
+    if let Ok(preferences) = profile_art::load() {
+        for game in &mut games { if let Some(choice) = preferences.get(&game.id) {
+            game.profile_image = profile_art::chosen_image(choice).map(|p| p.to_string_lossy().to_string());
+            if let Some(id) = choice.steam_app_id { game.steam_app_id = Some(id);
+                if game.profile_image.is_none() { game.profile_image = art_cache_dir().map(|dir| dir.join(format!("steam-cover-{id}.png"))).filter(|p| p.is_file()).map(|p| p.to_string_lossy().to_string()); }
+            }
+        }}
     }
     games
 }
@@ -269,6 +311,7 @@ mod tests {
     fn explicit_artwork_wins_over_steam() {
         let game = Game {
             executable_path: None,
+            profile_image: None,
             id: "x".into(),
             name: "X".into(),
             artwork: Some("https://example.com/a.jpg".into()),

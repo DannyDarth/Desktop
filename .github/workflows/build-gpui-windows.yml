@@ -51,6 +51,9 @@ jobs:
       - name: Install JS dependencies
         run: npm ci
 
+      - name: Test keyboard routing
+        run: node gpui/js/test-keyboard-routing.mjs
+
       - name: Test macro engine
         run: cargo test --manifest-path gpui/tests/macro-core/Cargo.toml --locked
 

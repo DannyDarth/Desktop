@@ -62,6 +62,15 @@ const mockWanted = (): string => String((globalThis as any).__mock ?? "");
     if (!candidate) throw new Error(`Unknown interface ${key}; list candidates first.`);
     const mock = isMockKey(key);
     const device = mock ? { key, brand: mockBrand(key), driver: "Mock", status: mockStatus(key) as any } : await connectToInterface(candidate.info);
+    if ((device as any).kind === "keyboard") {
+      const status: any = device.status;
+      // The keyboard status is kept intact. Do not manufacture mouse settings
+      // or expose mouse write actions for a keyboard.
+      status.ui = { ...status.ui, pollingReadOnly: true };
+      status.batteryPercent = status.logitech?.battery?.percent ?? null;
+      lastStatus.set(key, status);
+      return JSON.stringify({ ...device, displayBrand: status.brand || device.brand, controls: null, tabs: {} });
+    }
     const caps = mock ? ({ sleepTimeouts: null, lowPowerThresholds: null, debounceMaxMs: null, debounceOptions: null, dpiMax: 26000 } as any) : deviceCapabilities(candidate.info);
     // Fallback DPI limits and presets per brand, as DevicePerformanceTab.tsx has
     // them: the device's own limits win (dpiBounds), these cover drivers that

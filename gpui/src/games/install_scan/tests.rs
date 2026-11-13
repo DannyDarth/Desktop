@@ -71,6 +71,7 @@ impl Drop for Fixture {
 fn game(steam: Option<u32>, epic: Option<&str>, riot: Option<&str>) -> Game {
     Game {
         executable_path: None,
+        profile_image: None,
         id: "fixture".into(),
         name: "Unrelated Display Name".into(),
         artwork: None,
@@ -443,4 +444,14 @@ fn missing_launchers_and_malformed_manifests_clear_installed_only() {
         games[0].art_url().as_deref(),
         Some("https://example.com/art.jpg")
     );
+}
+
+#[test]
+fn artwork_matches_the_executable_installation_not_a_similar_name() {
+    let f = Fixture::new();
+    f.steam("library", 553850, "Helldivers 2");
+    let exe = f.file("library/steamapps/common/Helldivers 2/bin/helldivers2.exe", "exe");
+    assert_eq!(steam_app_for_executable(&exe.to_string_lossy()), Some(553850));
+    let wrong = f.file("library/steamapps/common/Helldivers 2 Mod/game.exe", "exe");
+    assert_eq!(steam_app_for_executable(&wrong.to_string_lossy()), None);
 }

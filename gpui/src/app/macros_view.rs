@@ -314,7 +314,7 @@ impl AppView {
                     },
                 ));
             }
-            activation = activation.child(options).child(div().text_xs().text_color(cx.theme().muted_foreground)
+            activation = activation.child(self.render_game_art_actions(&game_id, cx)).child(options).child(div().text_xs().text_color(cx.theme().muted_foreground)
                 .child(if focus_only { "Alt+Tab switches away from this macro set and stops its playback. Returning to the game reactivates the set." } else { "Keeps this game's macro set active while it runs, including after Alt+Tab." }));
         }
         let mut list = div().flex().flex_col().gap_2();

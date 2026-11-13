@@ -153,6 +153,26 @@ fn library_paths(text: &str) -> Vec<PathBuf> {
         .collect()
 }
 
+/// Identify the Steam manifest whose installation contains this executable.
+pub(super) fn steam_app_for_executable(executable: &str) -> Option<u32> {
+    let executable = Path::new(executable);
+    let common = executable.ancestors().find(|p| p.file_name().is_some_and(|s| s.eq_ignore_ascii_case("common")) && p.parent().and_then(|p| p.file_name()).is_some_and(|s| s.eq_ignore_ascii_case("steamapps")))?;
+    let apps = common.parent()?;
+    for entry in std::fs::read_dir(apps).ok()?.flatten() {
+        let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+        let Some(id) = name.strip_prefix("appmanifest_").and_then(|s| s.strip_suffix(".acf")).and_then(|s| s.parse::<u32>().ok()) else { continue; };
+        if entry.metadata().ok().is_none_or(|m| m.len() > 1024 * 1024) { continue; }
+        let Ok(text) = std::fs::read_to_string(entry.path()) else { continue; };
+        let Some(doc) = vdf::parse(&text) else { continue; };
+        let Some(state) = doc.map("appstate") else { continue; };
+        if state.text("appid").and_then(|s| s.parse::<u32>().ok()) != Some(id) { continue; }
+        let Some(dir) = state.text("installdir").and_then(safe_relative) else { continue; };
+        let root = common.join(dir);
+        if executable.ancestors().any(|p| crate::macros::paths_match(&p.to_string_lossy(), &root.to_string_lossy())) { return Some(id); }
+    }
+    None
+}
+
 fn scan_steam(roots: &[PathBuf], ids: &mut HashSet<u32>) {
     for library in steam_libraries(roots) {
         let Ok(entries) = std::fs::read_dir(library.join("steamapps")) else {
@@ -619,4 +639,5 @@ mod windows_registry {
 }
 
 #[cfg(test)]
+#[path = "install_scan/tests.rs"]
 mod tests;

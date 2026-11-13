@@ -203,3 +203,8 @@ runs in the background without launching the game; cached PNGs avoid repeating
 it on every visit. Updating the executable changes the icon cache key. Icons
 are shown contained rather than stretched into cover artwork. If a file has no
 readable icon, its existing name-initial placeholder remains available.
+
+### Profile artwork and Logitech keyboards
+Added games automatically match their Steam installation manifest and download a cover. In a game's Macros or device profile view, **Choose image** accepts PNG, JPEG or BMP (up to 20 MB); **Find Steam cover** retries the lookup and replaces a manual image only after a successful download. Manual artwork is copied into `%APPDATA%\openmouse\profile-images`, so moving the original image or updating the application does not remove it. Non-Steam games can use a chosen image or the executable icon fallback.
+
+The native app now includes the Logitech keyboard protocol driver. Direct G915 X devices use this driver instead of a mouse driver; Logitech receivers retain mouse detection and can also identify a paired keyboard. Keyboard device configuration remains read-only in this build. Macro recording and assignment use Windows input hooks independently of the HID connection. G915 X hardware verification is pending.
