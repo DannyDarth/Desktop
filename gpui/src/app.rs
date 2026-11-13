@@ -1116,7 +1116,7 @@ impl AppView {
                         }
                         if let Some(tile) = v.devices.tiles.iter_mut().find(|t| t.key == key) {
                             if let TileStatus::Connected(r) = &mut tile.status {
-                                for section in r.tabs.buttons.iter_mut().chain(r.tabs.advanced.iter_mut()).chain(r.tabs.performance.iter_mut()) {
+                                for section in r.tabs.buttons.iter_mut().chain(r.tabs.advanced.iter_mut()).chain(r.tabs.performance.iter_mut()).chain(r.tabs.keyboard_lighting.iter_mut()) {
                                     for control in &mut section.controls {
                                         if control.id == id {
                                             control.current = value.clone();
@@ -2405,7 +2405,7 @@ impl AppView {
     /// where the art should dominate.
     fn device_art(&self, tile: &Tile, side: f32, zoom: f32) -> Div {
         let frame = div().relative().flex_none().w(px(side)).h(px(side)).overflow_hidden();
-        if matches!(&tile.status, TileStatus::Connected(r) if r.keyboard) || tile.name.to_ascii_lowercase().contains("g915") || tile.name.to_ascii_lowercase().contains("keyboard") {
+        if (matches!(&tile.status, TileStatus::Connected(r) if r.keyboard) || tile.name.to_ascii_lowercase().contains("g915") || tile.name.to_ascii_lowercase().contains("keyboard")) && !tile.art.as_ref().is_some_and(|a| a.path.file_name().is_some_and(|f| f.to_string_lossy().starts_with("logitech-g915-x-"))) {
             return frame.flex().items_center().justify_center().child(Self::keyboard_graphic(side, &tile.name));
         }
         let Some(art) = &tile.art else { return frame };
@@ -2489,6 +2489,7 @@ impl AppView {
             .iter()
             .chain(&r.tabs.buttons)
             .chain(&r.tabs.advanced)
+            .chain(&r.tabs.keyboard_lighting)
             .flat_map(|s| s.controls.iter())
             .filter(|c| c.kind == "number" || c.kind == "stepped")
             .cloned()
@@ -3120,11 +3121,14 @@ impl AppView {
         let content: AnyElement = match &tile.status {
             TileStatus::Connected(r) if r.keyboard => {
                 let mut col = div().flex().flex_col().gap_3().max_w(px(720.))
-                    .child(div().text_lg().child("Keyboard lighting"))
+                    .child(div().text_lg().child(if self.devices.tab == DeviceTab::Advanced { "Keyboard details" } else { "Keyboard lighting" }))
                     .child(div().text_sm().text_color(muted).child("Create and assign keyboard macros in Macros. Lighting controls below come from the keyboard's reported capabilities."));
-                for section in &r.tabs.advanced {
+                let sections = if self.devices.tab == DeviceTab::Advanced { &r.tabs.advanced } else { &r.tabs.keyboard_lighting };
+                for section in sections {
                     for control in &section.controls { col = col.child(self.render_control(control, cx)); }
                 }
+                if self.devices.writing.is_some() { col = col.child(div().text_sm().text_color(muted).child("Applying lighting…")); }
+                if let Some(error) = &self.devices.write_error { col = col.child(div().text_sm().text_color(cx.theme().danger).child(format!("Could not apply: {error}"))); }
                 col.into_any_element()
             },
             TileStatus::Connected(r) if self.devices.tab != DeviceTab::Performance => self.render_extra_tab(r, cx),
@@ -3342,7 +3346,7 @@ impl AppView {
         let (has_buttons, has_lighting, has_advanced, has_profiles) = match &tile.status {
             TileStatus::Connected(r) => (
                 !r.tabs.buttons.is_empty() || r.onboard_profiles,
-                r.tabs.lighting.is_some(),
+                r.tabs.lighting.is_some() || !r.tabs.keyboard_lighting.is_empty(),
                 !r.tabs.advanced.is_empty(),
                 r.onboard_profiles,
             ),

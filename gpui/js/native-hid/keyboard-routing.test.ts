@@ -17,10 +17,10 @@ console.log("Keyboard routing checks passed (G915 X, G903 and unrelated vendor).
 const { keyboardTabs, writeKeyboardLighting } = await import("./keyboard-lighting");
 const { LogitechKeyboardHidClient } = await import("@openmouse/keyboard-protocol/drivers/logitech/hid");
 const fixture = {logitech:{brightness:{value:50,min:0,max:100,steps:100,illumination:true,illuminationEnabled:true},lighting:{zones:[0,1],rgbZones:[{index:0,effects:[{id:0},{id:1},{id:2}]}],legacyZones:[],legacyEffectReadback:false}}};
-assert.equal(keyboardTabs({}).advanced[0].controls[0].kind,"info");
-assert.ok(keyboardTabs(fixture).advanced[0].controls.some(c=>c.id==="keyboard.color"));
+assert.equal(keyboardTabs({}).keyboardLighting[0].controls[0].kind,"info");
+assert.ok(keyboardTabs(fixture).keyboardLighting[0].controls.some(c=>c.id==="keyboard.color"));
 const disjoint = {logitech:{lighting:{zones:[],legacyZones:[],rgbZones:[{effects:[{id:1}]},{effects:[{id:2}]}]}}};
-assert.equal(keyboardTabs(disjoint).advanced[0].controls.some(c=>c.id==="keyboard.effect"),false,"Only effects shared by all clusters are offered");
+assert.equal(keyboardTabs(disjoint).keyboardLighting[0].controls.some(c=>c.id==="keyboard.effect"),false,"Only effects shared by all clusters are offered");
 const calls:any[]=[];
 const prototype:any=LogitechKeyboardHidClient.prototype;
 const originals=new Map(["open","close","readStatus","setBrightness","setSolidColor"].map(key=>[key,prototype[key]]));
@@ -40,3 +40,22 @@ try {
   assert.equal(calls.at(-1),"close","The HID handle closes after rejection");
 } finally { for (const [key,value] of originals) prototype[key]=value; }
 console.log("Keyboard lighting checks passed (capabilities, writes, validation and cleanup).");
+
+const {applyKeyboardEffect} = await import("./keyboard-lighting");
+const packets:any[]=[];
+const transport:any={serialized:async(fn:any)=>fn(),getFeature:async()=>8,requestMode:async(...args:any[])=>{packets.push(args);return new Uint8Array()}};
+const effects={name:"G915 X",logitech:{lighting:{rgbZones:[{index:0,effects:[{index:4,id:3}]}]}}};
+await applyKeyboardEffect(transport,effects,"Cycling");
+assert.deepEqual(packets[0],[8,5,[1,3,7],false]);
+assert.equal(packets[1][1],1); assert.equal(packets[1][2][1],4,"Use advertised effect ordinal");
+assert.deepEqual(packets[1][2].slice(7,10),[19,136,100],"Cycle period and brightness bytes");
+assert.equal(packets[1][2][12],1,"Apply effect immediately");
+packets.length=0;
+await assert.rejects(applyKeyboardEffect({...transport,requestMode:async()=>{throw new Error("Control rejected")}},effects,"Cycling"),/Control rejected/);
+assert.equal(keyboardTabs(fixture).advanced[0].controls[0].id,"keyboard.model");
+const {keyboardArt}=await import("./keyboard-art");
+assert.match(keyboardArt("G915 X")!.filename,/wired/);
+assert.match(keyboardArt("G915 X LIGHTSPEED")!.filename,/lightspeed/);
+assert.match(keyboardArt("G915 X LIGHTSPEED TKL")!.filename,/tkl/);
+assert.equal(keyboardArt("G903 LIGHTSPEED"),null);
+console.log("Keyboard effect handshake, tab layout and exact model artwork checks passed.");

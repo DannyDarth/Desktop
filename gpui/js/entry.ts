@@ -1,3 +1,4 @@
+import { keyboardArt } from "./native-hid/keyboard-art";
 import { keyboardTabs, writeKeyboardLighting } from "./native-hid/keyboard-lighting";
 // Entry for the JS bundle embedded in the GPUI app (see build.mjs). Exposes
 // the same list/connect flow the Tauri app runs (src/native-hid/scan.ts),
@@ -36,6 +37,8 @@ const mockWanted = (): string => String((globalThis as any).__mock ?? "");
   /** Artwork for a device: URL plus the box-relative placement `deviceArtStyle` computes in the Tauri app. */
   async deviceImage(argsJson: string): Promise<string> {
     const [key, name] = JSON.parse(argsJson) as [string, string];
+    const keyboard = keyboardArt(name);
+    if (keyboard) return JSON.stringify(keyboard);
     const filename = deviceImageFilename(key, name);
     const bounds = artBounds(filename);
     let art = null;

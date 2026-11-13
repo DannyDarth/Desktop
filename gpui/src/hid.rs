@@ -291,6 +291,8 @@ pub struct Tabs {
     pub buttons: Vec<Section>,
     #[serde(default)]
     pub advanced: Vec<Section>,
+    #[serde(rename = "keyboardLighting", default)]
+    pub keyboard_lighting: Vec<Section>,
     #[serde(default)]
     pub lighting: Option<LightingSpec>,
 }
