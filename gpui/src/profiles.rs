@@ -90,8 +90,12 @@ impl<'de> Deserialize<'de> for Profiles {
         let raw = BTreeMap::<String, Value>::deserialize(deserializer)?;
         let mut out = BTreeMap::new();
         for (game, entry) in raw {
-            let Some(object) = entry.as_object() else { continue };
-            let legacy = ["dpi", "polling", "lod", "surface", "auto_apply"].iter().any(|k| object.contains_key(*k));
+            let Some(object) = entry.as_object() else {
+                continue;
+            };
+            let legacy = ["dpi", "polling", "lod", "surface", "auto_apply"]
+                .iter()
+                .any(|k| object.contains_key(*k));
             let per_device: BTreeMap<String, GameProfile> = if legacy {
                 serde_json::from_value::<GameProfile>(entry.clone())
                     .map(|p| BTreeMap::from([(ANY_DEVICE.to_string(), p)]))
@@ -99,7 +103,11 @@ impl<'de> Deserialize<'de> for Profiles {
             } else {
                 object
                     .iter()
-                    .filter_map(|(device, v)| serde_json::from_value::<GameProfile>(v.clone()).ok().map(|p| (device.clone(), p)))
+                    .filter_map(|(device, v)| {
+                        serde_json::from_value::<GameProfile>(v.clone())
+                            .ok()
+                            .map(|p| (device.clone(), p))
+                    })
                     .collect()
             };
             if !per_device.is_empty() {
@@ -144,18 +152,33 @@ impl Profiles {
 
     /// This device's profile, or — for the device that inherits it — the legacy
     /// one. `inherits_legacy` is the caller's call (first mouse-like device).
-    pub fn effective(&self, game_id: &str, device: &str, inherits_legacy: bool) -> Option<&GameProfile> {
-        self.get(game_id, device).or_else(|| if inherits_legacy { self.legacy(game_id) } else { None })
+    pub fn effective(
+        &self,
+        game_id: &str,
+        device: &str,
+        inherits_legacy: bool,
+    ) -> Option<&GameProfile> {
+        self.get(game_id, device).or_else(|| {
+            if inherits_legacy {
+                self.legacy(game_id)
+            } else {
+                None
+            }
+        })
     }
 
     /// True if any device has a profile that changes something.
     pub fn has_any(&self, game_id: &str) -> bool {
-        self.0.get(game_id).is_some_and(|per| per.values().any(GameProfile::is_meaningful))
+        self.0
+            .get(game_id)
+            .is_some_and(|per| per.values().any(GameProfile::is_meaningful))
     }
 
     /// True if any device's profile for the game applies on launch.
     pub fn any_auto(&self, game_id: &str) -> bool {
-        self.0.get(game_id).is_some_and(|per| per.values().any(|p| p.auto_apply && p.is_meaningful()))
+        self.0
+            .get(game_id)
+            .is_some_and(|per| per.values().any(|p| p.auto_apply && p.is_meaningful()))
     }
 
     /// Stores `profile` for the device, or drops it when it no longer does
@@ -168,6 +191,18 @@ impl Profiles {
         } else {
             self.clear(game_id, device);
         }
+    }
+
+    pub fn consolidate_duplicate(&mut self, old: &str, keep: &str) {
+        if let Some(profiles) = self.0.remove(old) {
+            let existing = self.0.entry(keep.into()).or_default();
+            for (device, profile) in profiles {
+                existing.entry(device).or_insert(profile);
+            }
+        }
+    }
+    pub fn delete_game(&mut self, game_id: &str) {
+        self.0.remove(game_id);
     }
 
     pub fn clear(&mut self, game_id: &str, device: &str) {
@@ -185,20 +220,34 @@ mod tests {
     use super::*;
 
     fn dpi(v: f64) -> GameProfile {
-        GameProfile { dpi: Some(v), ..Default::default() }
+        GameProfile {
+            dpi: Some(v),
+            ..Default::default()
+        }
     }
 
     #[test]
     fn describes_only_what_it_sets() {
-        let p = GameProfile { dpi: Some(800.0), polling: Some(1000), ..Default::default() };
+        let p = GameProfile {
+            dpi: Some(800.0),
+            polling: Some(1000),
+            ..Default::default()
+        };
         assert_eq!(p.describe(), "800 DPI, 1000 Hz");
         assert!(p.is_meaningful());
-        assert!(!GameProfile { auto_apply: true, ..Default::default() }.is_meaningful());
+        assert!(!GameProfile {
+            auto_apply: true,
+            ..Default::default()
+        }
+        .is_meaningful());
     }
 
     #[test]
     fn js_shape_omits_untouched_fields() {
-        let p = GameProfile { lod: Some("Low".into()), ..Default::default() };
+        let p = GameProfile {
+            lod: Some("Low".into()),
+            ..Default::default()
+        };
         let v = p.to_js();
         assert_eq!(v["liftOffDistance"], "Low");
         assert!(v.get("dpi").is_none() && v.get("pollingRateHz").is_none());
@@ -231,13 +280,21 @@ mod tests {
     fn reads_the_old_flat_format() {
         let old = r#"{ "valorant": { "dpi": 800.0, "polling": 8000, "lod": null, "surface": null, "auto_apply": true } }"#;
         let mut ps: Profiles = serde_json::from_str(old).unwrap();
-        let legacy = ps.legacy("valorant").expect("kept as the any-device profile");
-        assert_eq!((legacy.dpi, legacy.polling, legacy.auto_apply), (Some(800.0), Some(8000), true));
+        let legacy = ps
+            .legacy("valorant")
+            .expect("kept as the any-device profile");
+        assert_eq!(
+            (legacy.dpi, legacy.polling, legacy.auto_apply),
+            (Some(800.0), Some(8000), true)
+        );
         // Only the device that inherits it sees it.
         assert!(ps.effective("valorant", "046d:c54d", true).is_some());
         assert!(ps.effective("valorant", "31e3:1322", false).is_none());
         // Editing under a device takes it over.
-        let mut mine = ps.effective("valorant", "046d:c54d", true).cloned().unwrap();
+        let mut mine = ps
+            .effective("valorant", "046d:c54d", true)
+            .cloned()
+            .unwrap();
         mine.dpi = Some(1600.0);
         ps.set("valorant", "046d:c54d", mine);
         assert!(ps.legacy("valorant").is_none());
@@ -250,5 +307,19 @@ mod tests {
         ps.set("cs2", "046d:c54d", dpi(400.0));
         let back: Profiles = serde_json::from_str(&serde_json::to_string(&ps).unwrap()).unwrap();
         assert_eq!(back.get("cs2", "046d:c54d").unwrap().dpi, Some(400.0));
+    }
+}
+
+#[cfg(test)] mod duplicate_and_delete_tests {
+    use super::*;
+    #[test] fn duplicate_device_settings_fill_missing_devices_without_overwriting_keeper() {
+        let mut profiles=Profiles::default();
+        profiles.set("keep","mouse",GameProfile{dpi:Some(800.),..Default::default()});
+        profiles.set("old","mouse",GameProfile{dpi:Some(1600.),..Default::default()});
+        profiles.set("old","keyboard",GameProfile{polling:Some(1000),..Default::default()});
+        profiles.consolidate_duplicate("old","keep");
+        assert_eq!(profiles.get("keep","mouse").unwrap().dpi,Some(800.));
+        assert!(profiles.get("keep","keyboard").is_some());assert!(!profiles.has_any("old"));
+        profiles.delete_game("keep");assert!(!profiles.has_any("keep"));
     }
 }

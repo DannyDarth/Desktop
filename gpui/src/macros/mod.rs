@@ -192,7 +192,9 @@ pub struct Library {
 }
 impl Library {
     pub fn register_discovered_profile(&mut self, id: &str) {
-        if self.discovered_profiles.insert(id.into()) && !self.macros.iter().any(|m| m.game_id.as_deref() == Some(id)) {
+        if self.discovered_profiles.insert(id.into())
+            && !self.macros.iter().any(|m| m.game_id.as_deref() == Some(id))
+        {
             self.focus_only.insert(id.into());
         }
     }
@@ -477,12 +479,41 @@ impl Engine {
     /// Persist discovery once without interrupting a recording or playback.
     pub fn register_discovered_profile(&self, id: &str) -> Result<bool, String> {
         let mut state = self.state.lock().unwrap();
-        if state.snapshot.library.discovered_profiles.contains(id) { return Ok(false); }
+        if state.snapshot.library.discovered_profiles.contains(id) {
+            return Ok(false);
+        }
         let mut library = state.snapshot.library.clone();
         library.register_discovered_profile(id);
         self.save(&library)?;
         state.snapshot.library = library;
         Ok(true)
+    }
+    pub fn prepare_game_profile_delete(
+        &self,
+        id: String,
+    ) -> impl FnOnce() -> Result<(), String> + Send + 'static {
+        self.stop();
+        let state = self.state.clone();
+        let path = self.path.clone();
+        move || {
+            let mut state = state.lock().unwrap();
+            let mut library = state.snapshot.library.clone();
+            library
+                .macros
+                .retain(|m| m.game_id.as_deref() != Some(id.as_str()));
+            library.focus_only.remove(&id);
+            library.discovered_profiles.remove(&id);
+            persist(path.as_deref(), &library)?;
+            state.snapshot.library = library;
+            state.snapshot.running_games.retain(|g| g != &id);
+            if state.snapshot.focused_game.as_deref() == Some(id.as_str()) {
+                state.snapshot.focused_game = None;
+            }
+            if state.snapshot.active_game.as_deref() == Some(id.as_str()) {
+                state.snapshot.active_game = None;
+            }
+            Ok(())
+        }
     }
     pub fn snapshot(&self) -> Snapshot {
         let state = self.state.lock().unwrap();
@@ -778,7 +809,7 @@ mod tests {
                 snapshot: Snapshot {
                     library: Library {
                         focus_only: HashSet::new(),
-            discovered_profiles: HashSet::new(),
+                        discovered_profiles: HashSet::new(),
                         enabled: true,
                         macros: vec![],
                     },
@@ -1106,5 +1137,68 @@ mod tests {
             ..custom
         };
         assert!(built_in.matches(r"D:\Other\HELLDIVERS2.EXE"));
+    }
+}
+
+#[cfg(test)]
+mod profile_delete_regression {
+    use super::*;
+    #[test]
+    fn deleting_one_profile_persists_other_game_and_default_macros() {
+        let root = std::env::temp_dir().join(format!(
+            "openmouse-delete-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let make = |game: Option<&str>| Macro {
+            name: "Test".into(),
+            game_id: game.map(str::to_owned),
+            trigger: Trigger::Shortcut { key: 0x75 },
+            mode: MacroMode::NoRepeat,
+            repeats: 1,
+            steps: vec![],
+            on_press: vec![],
+            on_release: vec![],
+        };
+        let mut library = Library::default();
+        library.macros = vec![make(Some("delete")), make(Some("keep")), make(None)];
+        library.focus_only.insert("delete".into());
+        let engine = Engine {
+            state: Arc::new(Mutex::new(State {
+                snapshot: Snapshot {
+                    library,
+                    recording: None,
+                    recorded_steps: vec![],
+                    assigning: None,
+                    section: Section::Repeat,
+                    playing: false,
+                    message: String::new(),
+                    active_game: Some("delete".into()),
+                    running_games: vec!["delete".into()],
+                    focused_game: Some("delete".into()),
+                },
+                capture: None,
+                draft: vec![],
+                finish_requested: false,
+                trigger_capture: None,
+            })),
+            cancel: Arc::new(AtomicBool::new(false)),
+            path: Some(root.join("macros.json")),
+            catalog: Arc::new(Mutex::new(vec![])),
+        };
+        engine.prepare_game_profile_delete("delete".into())().unwrap();
+        let saved: Library =
+            serde_json::from_slice(&std::fs::read(root.join("macros.json")).unwrap()).unwrap();
+        assert_eq!(saved.macros.len(), 2);
+        assert!(saved.macros.iter().any(|m| m.game_id.is_none()));
+        assert!(saved
+            .macros
+            .iter()
+            .any(|m| m.game_id.as_deref() == Some("keep")));
+        assert!(engine.snapshot().active_game.is_none());
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

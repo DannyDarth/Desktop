@@ -88,3 +88,6 @@ pub mod proc;
         assert!(library.focus_only.contains("counter-strike-2"));
     }
 }
+
+#[path = "../../../src/profiles.rs"]
+pub mod profiles;

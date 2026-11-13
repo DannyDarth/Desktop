@@ -5,7 +5,23 @@ use gpui_kit::component::TitleBar;
 use gpui_kit::*;
 use openmouse_gpui::app::AppView;
 
+fn install_crash_log() {
+    let Some(dir)=dirs::config_dir().map(|p|p.join("openmouse")) else {return};
+    let _=std::fs::create_dir_all(&dir);
+    let path=dir.join("crash.log");
+    if std::fs::metadata(&path).is_ok_and(|m|m.len()>1024*1024) {let _=std::fs::rename(&path,dir.join("crash.previous.log"));}
+    let previous=std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        use std::io::Write;
+        if let Ok(mut file)=std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            let _=writeln!(file,"OpenMouse {} panic at {:?}: {info}\n{}",env!("CARGO_PKG_VERSION"),std::time::SystemTime::now(),std::backtrace::Backtrace::force_capture());
+        }
+        previous(info);
+    }));
+}
+
 fn main() {
+    install_crash_log();
     // Headless mode for the installer: list the plugged-in supported devices
     // and exit before any window or background work starts.
     if let Some(path) = openmouse_gpui::supported_devices::requested_path() {

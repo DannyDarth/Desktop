@@ -2,9 +2,9 @@
 use super::{custom, install_scan, Game};
 use std::path::Path;
 #[derive(Debug)]
-pub enum Discovered {
-    Existing(String),
-    Added(custom::CustomGame),
+pub struct Discovered {
+    pub game: custom::CustomGame,
+    pub catalog: Vec<Game>,
 }
 pub fn catalog_match<'a>(catalog: &'a [Game], executable: &str) -> Option<&'a Game> {
     let name = executable.rsplit(['\\', '/']).next()?;
@@ -49,16 +49,13 @@ pub fn eligible(executable: &str) -> bool {
 }
 pub fn discover(executable: &str) -> Result<Option<Discovered>, String> {
     let catalog = super::load_catalog();
-    if let Some(game) = catalog_match(&catalog, executable) {
-        // Manual profiles keep their activation preferences.
-        if game.executable_path.is_some()
-            && !custom::load()?
-                .iter()
-                .any(|c| c.id == game.id && c.auto_discovered)
-        {
-            return Ok(None);
-        }
-        return Ok(Some(Discovered::Existing(game.id.clone())));
+    // An existing profile is already handled by normal process/focus tracking.
+    // Discovery must not reload or change its activation settings.
+    if catalog_match(&catalog, executable).is_some() {
+        return Ok(None);
+    }
+    if super::deleted::blocked(executable, None)? {
+        return Ok(None);
     }
     if !eligible(executable) {
         return Ok(None);
@@ -71,11 +68,14 @@ pub fn discover(executable: &str) -> Result<Option<Discovered>, String> {
         } else {
             return Ok(None);
         };
-    let game = custom::add_discovered(Path::new(executable), &name, steam)?;
-    if !game.auto_discovered {
+    if super::deleted::blocked(executable, steam)? {
         return Ok(None);
     }
-    Ok(Some(Discovered::Added(game)))
+    let game = custom::add_discovered(Path::new(executable), &name, steam)?;
+    Ok(Some(Discovered {
+        game,
+        catalog: super::load_catalog(),
+    }))
 }
 #[cfg(not(windows))]
 pub fn foreground_executable() -> Option<String> {
@@ -135,6 +135,16 @@ mod tests {
             assert!(!eligible(exe), "{exe}");
         }
         assert!(discover(r"C:\Unknown Folder\Unrecognized Game.exe")
+            .unwrap()
+            .is_none());
+    }
+}
+
+#[cfg(test)]
+mod existing_profile_regression {
+    #[test]
+    fn known_profile_does_not_enter_the_discovery_update_path() {
+        assert!(super::discover(r"D:\Games\CounterStrike\cs2.exe")
             .unwrap()
             .is_none());
     }

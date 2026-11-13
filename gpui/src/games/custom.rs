@@ -91,10 +91,11 @@ fn add_to_named(
         return Ok(existing.clone());
     }
     if let Some((_, Some(app))) = discovered {
-        if let Some(index) = entries
-            .iter()
-            .position(|e| e.auto_discovered && e.steam_app_id == Some(app))
-        {
+        if let Some(index) = entries.iter().position(|e| {
+            e.steam_app_id
+                .or_else(|| super::install_scan::steam_app_for_executable(&e.path))
+                == Some(app)
+        }) {
             if !entries[index]
                 .aliases
                 .iter()
@@ -142,6 +143,9 @@ fn add_to_named(
     Ok(entry)
 }
 fn save(path: &Path, entries: &[CustomGame]) -> Result<(), String> {
+    save_value(path, entries)
+}
+pub(super) fn save_value(path: &Path, entries: &(impl Serialize + ?Sized)) -> Result<(), String> {
     std::fs::create_dir_all(
         path.parent()
             .ok_or("No configuration folder is available.")?,
@@ -253,5 +257,186 @@ mod discovery_tests {
         assert!(!old.auto_discovered);
         assert!(old.aliases.is_empty());
         assert!(old.catalog_id.is_none());
+    }
+}
+
+/// Keep profiles with macros; consolidate only empty duplicate records.
+pub fn cleanup_empty_duplicates(
+    with_macros: &std::collections::HashSet<String>,
+) -> Result<Vec<(String, String)>, String> {
+    let _writer = WRITER.lock().map_err(|_| "Game storage is unavailable.")?;
+    let config = config_path()?;
+    let mut entries = load_from(&config)?;
+    let artwork = super::profile_art::load()?;
+    let hidden = super::deleted::load()?;
+    let identities: Vec<_> = entries
+        .iter()
+        .map(|e| {
+            e.steam_app_id
+                .or_else(|| artwork.get(&e.id).and_then(|a| a.steam_app_id))
+                .or_else(|| super::install_scan::steam_app_for_executable(&e.path))
+        })
+        .collect();
+    let hidden_ids = hidden.iter().map(|d| d.id.clone()).collect();
+    let backup = entries.clone();
+    let removed = consolidate_duplicates(&mut entries, &identities, with_macros, &hidden_ids);
+    if !removed.is_empty() {
+        // Keep pre-cleanup metadata for recovery; macro contents are never edited.
+        save(
+            &config.with_file_name("duplicate-profiles-backup.json"),
+            &backup,
+        )?;
+        save(&config, &entries)?;
+    }
+    Ok(removed)
+}
+fn consolidate_duplicates(
+    entries: &mut Vec<CustomGame>,
+    steam: &[Option<u32>],
+    with_macros: &std::collections::HashSet<String>,
+    hidden: &std::collections::HashSet<String>,
+) -> Vec<(String, String)> {
+    let mut gone = std::collections::HashSet::new();
+    let mut removed = Vec::new();
+    for i in 0..entries.len() {
+        if gone.contains(&i) || hidden.contains(&entries[i].id) {
+            continue;
+        }
+        for j in i + 1..entries.len() {
+            if gone.contains(&i) {
+                break;
+            }
+            if gone.contains(&j) || hidden.contains(&entries[j].id) {
+                continue;
+            }
+            let same = (steam[i].is_some() && steam[i] == steam[j])
+                || crate::macros::paths_match(&entries[i].path, &entries[j].path);
+            if !same {
+                continue;
+            }
+            let a =
+                with_macros.contains(entries[i].catalog_id.as_deref().unwrap_or(&entries[i].id));
+            let b =
+                with_macros.contains(entries[j].catalog_id.as_deref().unwrap_or(&entries[j].id));
+            if a && b {
+                continue;
+            }
+            let (keep, drop) =
+                if b || (!a && entries[i].auto_discovered && !entries[j].auto_discovered) {
+                    (j, i)
+                } else {
+                    (i, j)
+                };
+            let paths = std::iter::once(entries[drop].path.clone())
+                .chain(entries[drop].aliases.clone())
+                .collect::<Vec<_>>();
+            for path in paths {
+                if !crate::macros::paths_match(&entries[keep].path, &path)
+                    && !entries[keep]
+                        .aliases
+                        .iter()
+                        .any(|p| crate::macros::paths_match(p, &path))
+                {
+                    if entries[keep].aliases.len() < 32 {
+                        entries[keep].aliases.push(path);
+                    }
+                }
+            }
+            entries[keep].steam_app_id = entries[keep].steam_app_id.or(steam[keep]);
+            removed.push((entries[drop].id.clone(), entries[keep].id.clone()));
+            gone.insert(drop);
+        }
+    }
+    let mut index = 0;
+    entries.retain(|_| {
+        let keep = !gone.contains(&index);
+        index += 1;
+        keep
+    });
+    // Resolve keeper chains when several empty records were consolidated.
+    for i in 0..removed.len() {
+        for _ in 0..removed.len() {
+            let next = removed
+                .iter()
+                .find(|(old, _)| old == &removed[i].1)
+                .map(|(_, new)| new.clone());
+            if let Some(next) = next {
+                removed[i].1 = next;
+            } else {
+                break;
+            }
+        }
+    }
+    removed
+}
+#[cfg(test)]
+mod duplicate_cleanup_tests {
+    use super::*;
+    fn entry(id: &str) -> CustomGame {
+        CustomGame {
+            id: id.into(),
+            name: id.into(),
+            path: format!("D:\\Games\\{id}.exe"),
+            auto_discovered: true,
+            steam_app_id: Some(553850),
+            aliases: vec![],
+            catalog_id: None,
+        }
+    }
+    #[test]
+    fn keeps_macros_and_both_nonempty_profiles_are_preserved() {
+        let mut entries = vec![entry("original"), entry("duplicate")];
+        let with_macros = std::collections::HashSet::from(["original".into()]);
+        let removed = consolidate_duplicates(
+            &mut entries,
+            &[Some(553850), Some(553850)],
+            &with_macros,
+            &Default::default(),
+        );
+        assert_eq!(removed, vec![("duplicate".into(), "original".into())]);
+        assert_eq!(entries[0].id, "original");
+        assert_eq!(entries[0].aliases.len(), 1);
+        let mut entries = vec![entry("original"), entry("duplicate")];
+        let both = std::collections::HashSet::from(["original".into(), "duplicate".into()]);
+        assert!(consolidate_duplicates(
+            &mut entries,
+            &[Some(553850), Some(553850)],
+            &both,
+            &Default::default()
+        )
+        .is_empty());
+        assert_eq!(entries.len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod existing_manual_regression {
+    use super::*;
+    #[test]
+    fn helldivers_manual_profile_reuses_steam_identity_and_keeps_its_id() {
+        let root = std::env::temp_dir().join(format!(
+            "openmouse-hd2-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let folder = root.join("steamapps/common/Helldivers 2/bin");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(root.join("steamapps/appmanifest_553850.acf"),r#""AppState" { "appid" "553850" "installdir" "Helldivers 2" "name" "HELLDIVERS 2" "StateFlags" "4" }"#).unwrap();
+        let original = folder.join("helldivers2.exe");
+        let launched = folder.join("helldivers2_alt.exe");
+        std::fs::write(&original, b"fixture").unwrap();
+        std::fs::write(&launched, b"fixture").unwrap();
+        let config = root.join("games.json");
+        let manual = add_to(&config, &original).unwrap();
+        let matched =
+            add_to_named(&config, &launched, Some(("HELLDIVERS 2", Some(553850)))).unwrap();
+        assert_eq!(manual.id, matched.id);
+        assert!(!matched.auto_discovered);
+        assert_eq!(load_from(&config).unwrap().len(), 1);
+        assert_eq!(matched.aliases.len(), 1);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

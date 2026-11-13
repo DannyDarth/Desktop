@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 pub mod custom;
 #[path = "games/discovery.rs"]
 pub mod discovery;
+#[path = "games/deleted.rs"]
+pub mod deleted;
 #[path = "games/executable_icon.rs"]
 pub mod executable_icon;
 #[path = "games/profile_art.rs"]
@@ -246,6 +248,7 @@ pub fn load_catalog() -> Vec<Game> {
             }
         }}
     }
+    if let Ok(deleted)=deleted::load() {games.retain(|g|!deleted.iter().any(|d|d.id==g.id));}
     games
 }
 pub fn macro_targets(games: &[Game]) -> Vec<crate::macros::GameTarget> {

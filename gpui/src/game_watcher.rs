@@ -95,6 +95,25 @@ impl GameWatcher {
             if !cfg!(windows) {
                 return;
             }
+            let Ok(with_macros) = view.update(cx, |v, _| v.profile_ids_with_macros()) else {
+                return;
+            };
+            let cleanup = cx
+                .background_executor()
+                .spawn(async move {
+                    let removed = games::custom::cleanup_empty_duplicates(&with_macros)?;
+                    Ok::<_, String>((games::load_catalog(), removed))
+                })
+                .await;
+            if view
+                .update(cx, |v, cx| match cleanup {
+                    Ok((catalog, removed)) => v.apply_profile_cleanup(catalog, removed, cx),
+                    Err(error) => v.report_game_discovery_error(error, cx),
+                })
+                .is_err()
+            {
+                return;
+            }
             let mut seen = std::collections::HashSet::new();
             loop {
                 let result = cx
