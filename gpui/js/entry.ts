@@ -1,3 +1,4 @@
+import { keyboardTabs, writeKeyboardLighting } from "./native-hid/keyboard-lighting";
 // Entry for the JS bundle embedded in the GPUI app (see build.mjs). Exposes
 // the same list/connect flow the Tauri app runs (src/native-hid/scan.ts),
 // bundled unmodified, behind two JSON-in/JSON-out functions for Rust.
@@ -69,7 +70,7 @@ const mockWanted = (): string => String((globalThis as any).__mock ?? "");
       status.ui = { ...status.ui, pollingReadOnly: true };
       status.batteryPercent = status.logitech?.battery?.percent ?? null;
       lastStatus.set(key, status);
-      return JSON.stringify({ ...device, displayBrand: status.brand || device.brand, controls: null, tabs: {} });
+      return JSON.stringify({ ...device, displayBrand: status.brand || device.brand, controls: null, tabs: keyboardTabs(status) });
     }
     const caps = mock ? ({ sleepTimeouts: null, lowPowerThresholds: null, debounceMaxMs: null, debounceOptions: null, dpiMax: 26000 } as any) : deviceCapabilities(candidate.info);
     // Fallback DPI limits and presets per brand, as DevicePerformanceTab.tsx has
@@ -147,6 +148,10 @@ const mockWanted = (): string => String((globalThis as any).__mock ?? "");
     };
     const candidate = lastList.get(key);
     if (!candidate) throw new Error(`Unknown interface ${key}; list candidates first.`);
+    if (lastStatus.get(key)?.logitech && lastStatus.get(key)?.ui?.settingsReady === false) {
+      if (!action.startsWith("control:keyboard.")) throw new Error("This keyboard only exposes keyboard lighting actions.");
+      return JSON.stringify(await writeKeyboardLighting(candidate.info, action.slice("control:".length), value));
+    }
     const w = brand === "Logitech" ? logitechWrite : genericWrite;
     const info = candidate.info;
     if (isMockKey(key) && !action.startsWith("control:")) return JSON.stringify(value);

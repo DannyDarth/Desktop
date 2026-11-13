@@ -2394,6 +2394,9 @@ impl AppView {
     /// where the art should dominate.
     fn device_art(&self, tile: &Tile, side: f32, zoom: f32) -> Div {
         let frame = div().relative().flex_none().w(px(side)).h(px(side)).overflow_hidden();
+        if matches!(&tile.status, TileStatus::Connected(r) if r.keyboard) || tile.name.to_ascii_lowercase().contains("g915") || tile.name.to_ascii_lowercase().contains("keyboard") {
+            return frame.flex().items_center().justify_center().child(Self::keyboard_graphic(side, &tile.name));
+        }
         let Some(art) = &tile.art else { return frame };
         let image = img(art.path.clone());
         match &art.placement {
@@ -2414,6 +2417,28 @@ impl AppView {
             }
             None => frame.child(image.size_full().object_fit(ObjectFit::Contain)),
         }
+    }
+
+    /// A code-drawn keyboard illustration, sized for each card. It remains
+    /// available offline and uses a compact layout for TKL models.
+    fn keyboard_graphic(side: f32, name: &str) -> Div {
+        let width = side * 0.90;
+        let columns = if name.to_ascii_lowercase().contains("tkl") { 16 } else { 20 };
+        let key = width / (columns as f32 + 2.);
+        let glow = rgb(0x4ade80);
+        let mut board = div().flex().flex_col().gap(px(key * 0.17)).p(px(key * 0.6))
+            .rounded(px(key * 0.4)).bg(rgb(0x171b1b)).border_1().border_color(rgb(0x596363));
+        for row in 0..6 {
+            let mut line = div().flex().gap(px(key * 0.17));
+            for column in 0..columns {
+                if row == 5 && column > 3 && column < 10 { continue; }
+                let space = row == 5 && column == 3;
+                line = line.child(div().w(px(if space { key * 8.02 } else { key })).h(px(key * 0.85))
+                    .rounded(px(key * 0.13)).bg(rgb(0x272e2e)).border_1().border_color(glow));
+            }
+            board = board.child(line);
+        }
+        board
     }
 
     /// Selectable pill used for the page's option lists.
@@ -3082,11 +3107,15 @@ impl AppView {
         };
 
         let content: AnyElement = match &tile.status {
-            TileStatus::Connected(r) if r.keyboard => div().flex().flex_col().gap_3()
-                .child(div().text_lg().child("Keyboard connected"))
-                .child(div().text_sm().text_color(muted).child("Create and assign keyboard macros in Macros. Device lighting and onboard keyboard settings are not available in this build."))
-                .children(r.firmware.iter().map(|line| div().text_sm().child(line.clone())))
-                .into_any_element(),
+            TileStatus::Connected(r) if r.keyboard => {
+                let mut col = div().flex().flex_col().gap_3().max_w(px(720.))
+                    .child(div().text_lg().child("Keyboard lighting"))
+                    .child(div().text_sm().text_color(muted).child("Create and assign keyboard macros in Macros. Lighting controls below come from the keyboard's reported capabilities."));
+                for section in &r.tabs.advanced {
+                    for control in &section.controls { col = col.child(self.render_control(control, cx)); }
+                }
+                col.into_any_element()
+            },
             TileStatus::Connected(r) if self.devices.tab != DeviceTab::Performance => self.render_extra_tab(r, cx),
             TileStatus::Connected(r) => {
                 let mut col = div().flex().flex_col().gap_3().flex_1().min_w_0().max_w(px(720.));
