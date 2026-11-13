@@ -674,6 +674,7 @@ impl AppView {
             }
         }).detach();
         view.scan_devices(cx);
+        view.watch_keyboard_cycle_errors(cx);
         view
     }
 
@@ -815,6 +816,34 @@ impl AppView {
 
     fn hid_service(&mut self) -> crate::hid::HidService {
         self.hid.get_or_insert_with(crate::hid::HidService::start).clone()
+    }
+
+    fn watch_keyboard_cycle_errors(&mut self, cx: &mut Context<Self>) {
+        let service = self.hid_service();
+        cx.spawn(async move |view, cx| {
+            loop {
+                futures_timer::Delay::new(Duration::from_secs(2)).await;
+                if view.update(cx, |_, _| ()).is_err() { break; }
+                let Ok(Ok(errors)) = service.keyboard_cycle_errors().await else { break; };
+                if errors.is_empty() { continue; }
+                if view.update(cx, |v: &mut Self, cx| {
+                    for (key, error) in errors {
+                        if v.devices.tiles.get(v.devices.selected).is_some_and(|t| t.key == key) {
+                            v.devices.write_error = Some(error.clone());
+                        }
+                        if let Some(Tile { status: TileStatus::Connected(r), .. }) = v.devices.tiles.iter_mut().find(|t| t.key == key) {
+                            for section in &mut r.tabs.keyboard_lighting {
+                                for control in &mut section.controls {
+                                    if control.id == "keyboard.effect" { control.current = serde_json::Value::Null; }
+                                }
+                            }
+                        }
+                        v.show_toast(error, true, cx);
+                    }
+                    cx.notify();
+                }).is_err() { break; }
+            }
+        }).detach();
     }
 
     /// Lists supported devices and connects each idle device sequentially.
@@ -2577,6 +2606,13 @@ impl AppView {
     fn render_control(&self, c: &crate::hid::ControlSpec, cx: &mut Context<Self>) -> AnyElement {
         let fg = cx.theme().foreground;
         let muted = cx.theme().muted_foreground;
+        if c.kind == "info" {
+            return div().flex().flex_col().gap_1().w_full().min_w_0().py_2()
+                .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(fg).child(c.label.clone()))
+                .child(div().text_sm().text_color(muted).w_full().min_w_0()
+                    .child(c.current.as_str().map(str::to_string).unwrap_or_else(|| c.current.to_string())))
+                .into_any_element();
+        }
         let id = c.id.clone();
         let label_block = div()
             .flex()
@@ -3120,9 +3156,9 @@ impl AppView {
 
         let content: AnyElement = match &tile.status {
             TileStatus::Connected(r) if r.keyboard => {
-                let mut col = div().flex().flex_col().gap_3().max_w(px(720.))
+                let mut col = div().flex().flex_col().gap_3().w_full().min_w_0().max_w(px(720.))
                     .child(div().text_lg().child(if self.devices.tab == DeviceTab::Advanced { "Keyboard details" } else { "Keyboard lighting" }))
-                    .child(div().text_sm().text_color(muted).child("Create and assign keyboard macros in Macros. Lighting controls below come from the keyboard's reported capabilities."));
+                    .child(div().text_sm().text_color(muted).child(if self.devices.tab == DeviceTab::Advanced { "Information reported by your keyboard." } else { "Cycling runs while OpenMouse is open. Selecting a solid color or another effect stops it." }));
                 let sections = if self.devices.tab == DeviceTab::Advanced { &r.tabs.advanced } else { &r.tabs.keyboard_lighting };
                 for section in sections {
                     for control in &section.controls { col = col.child(self.render_control(control, cx)); }
@@ -3332,7 +3368,7 @@ impl AppView {
 
         let firmware = match &tile.status {
             TileStatus::Connected(r) if !r.firmware.is_empty() => {
-                Some(format!("Firmware {}", r.firmware.join(" · ")))
+                Some(r.firmware.join(" · "))
             }
             _ => None,
         };
@@ -3865,7 +3901,7 @@ impl AppView {
                             .child(div().text_xs().text_color(muted).child(hint.to_string()))
                     };
                     let id = game_id.to_string();
-                    let mut col = div().flex().flex_col().gap_3().max_w(px(720.));
+                    let mut col = div().flex().flex_col().gap_3().w_full().min_w_0().max_w(px(720.));
                     let has_options = r.dpi.is_some() || !r.polling_rates.is_empty() || !r.lod_options.is_empty() || r.surface.is_some();
                     if !has_options {
                         col = col.child(div().text_sm().text_color(muted).child(

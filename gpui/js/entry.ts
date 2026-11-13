@@ -1,5 +1,5 @@
 import { keyboardArt } from "./native-hid/keyboard-art";
-import { keyboardTabs, writeKeyboardLighting } from "./native-hid/keyboard-lighting";
+import { keyboardTabs, writeKeyboardLighting, keyboardCycleNote, takeKeyboardCycleErrors } from "./native-hid/keyboard-lighting";
 // Entry for the JS bundle embedded in the GPUI app (see build.mjs). Exposes
 // the same list/connect flow the Tauri app runs (src/native-hid/scan.ts),
 // bundled unmodified, behind two JSON-in/JSON-out functions for Rust.
@@ -23,6 +23,7 @@ const lastCaps = new Map<string, any>();
 const mockWanted = (): string => String((globalThis as any).__mock ?? "");
 
 (globalThis as any).__api = {
+  async keyboardCycleErrors(): Promise<string> { return JSON.stringify(takeKeyboardCycleErrors()); },
   async listCandidates(): Promise<string> {
     // A trailing "!" on OPENMOUSE_MOCK (e.g. "ulx!") lists only the fakes.
     const candidates = mockWanted().endsWith("!") ? [] : await listCandidateInterfaces();
@@ -70,7 +71,7 @@ const mockWanted = (): string => String((globalThis as any).__mock ?? "");
       const status: any = device.status;
       // The keyboard status is kept intact. Do not manufacture mouse settings
       // or expose mouse write actions for a keyboard.
-      status.ui = { ...status.ui, pollingReadOnly: true };
+      status.ui = { ...status.ui, pollingReadOnly: true, statusNote: keyboardCycleNote(key) ?? status.ui?.statusNote };
       status.batteryPercent = status.logitech?.battery?.percent ?? null;
       lastStatus.set(key, status);
       return JSON.stringify({ ...device, displayBrand: status.brand || device.brand, controls: null, tabs: keyboardTabs(status) });

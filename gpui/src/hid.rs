@@ -356,6 +356,11 @@ impl HidService {
         })
     }
 
+    /// Animation errors only; does not open or poll any HID device.
+    pub fn keyboard_cycle_errors(&self) -> oneshot::Receiver<Result<Vec<(String, String)>, String>> {
+        self.call("keyboardCycleErrors", None, |json| serde_json::from_str(&json).map_err(|e| e.to_string()))
+    }
+
     /// Preferences the JS layer needs when it lays controls out. Sent before a
     /// connect; calls are served in order, so the connect sees them.
     pub fn set_prefs(&self, link_left_right: Option<bool>) {
