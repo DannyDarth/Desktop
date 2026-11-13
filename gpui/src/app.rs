@@ -476,6 +476,7 @@ pub struct AppView {
     macro_engine: crate::macros::Engine,
     macro_scope: Option<String>,
     macro_last_active: Option<String>,
+    macro_notice_pending: Option<crate::overlay::ProfileNotice>,
     macro_text_edit: Option<macros_view::MacroTextEdit>,
     game_delete_pending: Option<String>,
     firmware_checks: std::collections::HashMap<String,crate::firmware::CheckState>,
@@ -629,6 +630,7 @@ impl AppView {
             macro_engine: crate::macros::Engine::load(),
             macro_scope: None,
             macro_last_active: None,
+            macro_notice_pending: None,
             macro_text_edit: None,
             game_delete_pending: None,
             firmware_checks: Default::default(),
@@ -704,6 +706,7 @@ impl Default for AppView {
             macro_engine: crate::macros::Engine::load(),
             macro_scope: None,
             macro_last_active: None,
+            macro_notice_pending: None,
             macro_text_edit: None,
             game_delete_pending: None,
             firmware_checks: Default::default(),
@@ -1516,22 +1519,30 @@ impl AppView {
         .detach();
     }
 
-    /// Profile changes share one overlay slot and never repeat on unchanged polls.
+    /// Queue the newest profile change while Alt/Windows is held. This keeps
+    /// the full popup lifetime visible after the OS switcher has been released.
     fn sync_macro_profile_notice(&mut self, cx: &mut Context<Self>) {
         let state = self.macro_engine.snapshot();
-        if state.active_game == self.macro_last_active { return; }
-        self.macro_last_active = state.active_game.clone();
-        self.macro_scope = state.active_game.clone(); self.macro_selected = None; self.macro_text_edit = None;
-        if self.settings.overlay_enabled {
-            let (title, subtitle, detail) = match state.active_game.as_deref() {
-                Some(id) => (self.game_name(id), if state.library.enabled { "Macro profile active" } else { "Macro profile selected" },
-                    if !state.library.enabled { "Automatic triggers off" } else if state.library.focus_only.contains(id) { "While focused" } else { "While running" }),
-                None => ("Desktop".to_string(), if state.library.enabled { "Default profile active" } else { "Default profile selected" },
-                    if state.library.enabled { "Default macros" } else { "Automatic triggers off" }),
-            };
-            self.overlay = crate::overlay::show_profile(cx, self.overlay.take(), crate::overlay::ProfileNotice { title, subtitle: subtitle.into(), detail: detail.into() });
+        if state.active_game != self.macro_last_active {
+            self.macro_last_active = state.active_game.clone();
+            self.macro_scope = state.active_game.clone(); self.macro_selected = None; self.macro_text_edit = None;
+            if self.settings.overlay_enabled {
+                let (title, subtitle, detail) = match state.active_game.as_deref() {
+                    Some(id) => (self.game_name(id), if state.library.enabled { "Macro profile active" } else { "Macro profile selected" },
+                        if !state.library.enabled { "Automatic triggers off" } else if state.library.focus_only.contains(id) { "While focused" } else { "While running" }),
+                    None => ("Default profile".to_string(), if state.library.enabled { "Desktop macros active" } else { "Desktop profile selected" },
+                        if state.library.enabled { "Game is no longer focused" } else { "Automatic triggers off" }),
+                };
+                self.macro_notice_pending = Some(crate::overlay::ProfileNotice {title,subtitle:subtitle.into(),detail:detail.into()});
+            }
+            cx.notify();
         }
-        cx.notify();
+        if !self.settings.overlay_enabled {self.macro_notice_pending=None;return;}
+        if self.macro_engine.profile_notice_ready() {
+            if let Some(notice)=self.macro_notice_pending.take() {
+                self.overlay=crate::overlay::show_profile(cx,self.overlay.take(),notice);
+            }
+        }
     }
 
     /// A message about a game: on the screen overlay (the game has focus, so

@@ -516,6 +516,10 @@ impl Engine {
             Ok(())
         }
     }
+    pub fn profile_notice_ready(&self)->bool {
+        #[cfg(windows)] { windows::profile_notice_ready() }
+        #[cfg(not(windows))] { true }
+    }
     pub fn snapshot(&self) -> Snapshot {
         let state = self.state.lock().unwrap();
         let mut snapshot = state.snapshot.clone();

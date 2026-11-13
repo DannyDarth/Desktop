@@ -67,6 +67,7 @@ fn down(key: u16) -> bool {
         unsafe { GetAsyncKeyState(i32::from(key)) < 0 }
     }
 }
+pub(super) fn profile_notice_ready()->bool { !down(0x12) && !down(0x5b) && !down(0x5c) }
 fn action(code: u16, pressed: bool) -> Action {
     match code {
         1 => Action::Mouse {
