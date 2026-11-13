@@ -98,3 +98,6 @@ pub mod firmware;
 #[cfg(windows)]
 #[path = "../../../src/single_instance.rs"]
 pub mod single_instance;
+
+#[path = "../../../src/lighting_preferences.rs"]
+pub mod lighting_preferences;

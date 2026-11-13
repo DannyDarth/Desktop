@@ -1,3 +1,4 @@
+import { invoke } from "@tauri-apps/api/core";
 import { KeyboardLightingMemory } from "./keyboard-lighting-memory";
 import { KeyboardCycle } from "./keyboard-cycle";
 import { LogitechKeyboardHidClient } from "@openmouse/keyboard-protocol/drivers/logitech/hid";
@@ -7,6 +8,27 @@ import { withHidOpenLockRetrying, withHidOpenLock, isHidBusyError } from "./hid-
 const cycles = new Map<string, KeyboardCycle>();
 const lightingMemory=new KeyboardLightingMemory();
 const configuredModels=new Map<string,string>();
+let loadTask:Promise<void>|undefined;
+let saveQueue:Promise<unknown>=Promise.resolve();
+export async function loadKeyboardLightingMemory() {
+  if(!(globalThis as any).__host?.invoke)return;
+  loadTask ??= (async()=> {
+    try {
+      const entries=await invoke<any[]>("keyboard_lighting_load",{});
+      for(const entry of entries) {
+        configuredModels.set(entry.key,entry.model);
+        for(const command of entry.commands)lightingMemory.remember(entry.key,command.id,command.value);
+      }
+    } catch(error) {pendingCycleErrors.set("preferences",`Could not load saved keyboard lighting: ${String(error)}`);}
+  })();
+  await loadTask;
+}
+async function saveKeyboardLightingMemory() {
+  if(!(globalThis as any).__host?.invoke)return;
+  const entries=[...configuredModels].map(([key,model])=>({key,model,commands:lightingMemory.entries(key)}));
+  saveQueue=saveQueue.catch(()=>undefined).then(()=>invoke("keyboard_lighting_save",{entries}));
+  await saveQueue;
+}
 const restoreJobs=new Map<string,number>();
 let restoreSerial=0;
 export function scheduleKeyboardLightingRestore(devices:{info:HidInterfaceInfo,name:string}[]) {
@@ -62,6 +84,7 @@ export function keyboardTabs(status: any) {
   ]}]};
 }
 export async function writeKeyboardLighting(info: HidInterfaceInfo, id: string, value: any, remember=true, expectedRevision?:number) {
+  await loadKeyboardLightingMemory();
   return withHidOpenLockRetrying(info.key, async () => {
     if(expectedRevision!==undefined && lightingMemory.revision(info.key)!==expectedRevision)return value;
     const client = new LogitechKeyboardHidClient(new TauriHidDevice(info, {usagePage:0xff00,usage:1}));
@@ -129,6 +152,7 @@ export async function writeKeyboardLighting(info: HidInterfaceInfo, id: string, 
         if(configuredModels.get(info.key)!==status.name)lightingMemory.forget(info.key);
         configuredModels.set(info.key,status.name);
         lightingMemory.remember(info.key,id,value);
+        try {await saveKeyboardLightingMemory();} catch(error) {pendingCycleErrors.set(info.key,`Lighting applied, but could not save it for next launch: ${String(error)}`);}
         if(id==="keyboard.illumination" && value===true)scheduleKeyboardLightingRestore([{info,name:status.name}]);
       }
       return value;

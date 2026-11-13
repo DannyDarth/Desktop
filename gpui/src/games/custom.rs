@@ -145,7 +145,7 @@ fn add_to_named(
 fn save(path: &Path, entries: &[CustomGame]) -> Result<(), String> {
     save_value(path, entries)
 }
-pub(super) fn save_value(path: &Path, entries: &(impl Serialize + ?Sized)) -> Result<(), String> {
+pub(crate) fn save_value(path: &Path, entries: &(impl Serialize + ?Sized)) -> Result<(), String> {
     std::fs::create_dir_all(
         path.parent()
             .ok_or("No configuration folder is available.")?,

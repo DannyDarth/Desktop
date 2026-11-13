@@ -1459,6 +1459,7 @@ impl AppView {
                 if connected_now {
                     v.sync_running_profiles(cx);
                     v.check_firmware_source(key.clone(),cx);
+                    v.hid_service().restore_keyboard_lighting();
                 }
                 v.connect_next_device(cx);
                 v.refresh_presence(cx);

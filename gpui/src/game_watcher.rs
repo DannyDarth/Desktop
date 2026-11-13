@@ -11,10 +11,9 @@ use sysinfo::{ProcessRefreshKind, ProcessStatus, ProcessesToUpdate, System, Upda
 
 const PROCESS_INTERVAL: Duration = Duration::from_secs(2);
 const INSTALL_INTERVAL: Duration = Duration::from_secs(10);
-// While the window is not active the scans slow down rather than stop: a game
-// can still launch behind the window and its profile should still apply, just
-// a few seconds later. Coming back to the window rescans straight away.
-const PROCESS_INTERVAL_INACTIVE: Duration = Duration::from_secs(10);
+// Keep running-game checks responsive in the background; only installation
+// scans slow down while inactive. Returning to the window rescans immediately.
+const PROCESS_INTERVAL_INACTIVE: Duration = PROCESS_INTERVAL;
 const INSTALL_INTERVAL_INACTIVE: Duration = Duration::from_secs(60);
 
 /// Dropping the view drops these tasks, including any awaited background task.

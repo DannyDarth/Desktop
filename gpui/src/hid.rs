@@ -650,6 +650,11 @@ fn dispatch(
     let json = |v: &dyn erased::Ser| v.to_json();
 
     match command {
+        "keyboard_lighting_load"=>json(&crate::lighting_preferences::load()?),
+        "keyboard_lighting_save"=> {
+            let entries:Vec<crate::lighting_preferences::Preference>=serde_json::from_value(args.get("entries").cloned().ok_or("Missing lighting preferences.")?).map_err(|e|e.to_string())?;
+            crate::lighting_preferences::save(&entries)?;Ok(String::new())
+        },
         "hid_list_interfaces" => {
             let vendor_ids: Vec<u16> = args
                 .get("vendorIds")

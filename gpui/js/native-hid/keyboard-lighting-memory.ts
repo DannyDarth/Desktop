@@ -8,6 +8,7 @@ export class KeyboardLightingMemory {
     if(id==="keyboard.effect") state.values.delete("keyboard.color");
     state.values.set(id,value);state.revision=++this.nextRevision;this.saved.set(key,state);
   }
+  entries(key:string){return [...(this.saved.get(key)?.values.entries() ?? [])].map(([id,value])=>({id,value}));}
   forget(key:string){this.saved.delete(key);}
   revision(key:string){return this.saved.get(key)?.revision ?? 0;}
   plan(key:string) {

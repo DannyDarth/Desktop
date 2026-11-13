@@ -211,21 +211,36 @@ fn show_window(
         // Never call them while the caller holds App/Context's RefCell borrow:
         // GPUI's window procedure re-enters AsyncApp::update_window.
         cx.spawn(async move |cx| {
-            cx.background_executor().timer(Duration::from_millis(1)).await;
+            cx.background_executor()
+                .timer(Duration::from_millis(1))
+                .await;
             use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-            let hwnd = handle.update(cx, |_, window, _| {
-                match HasWindowHandle::window_handle(&*window).map(|h| h.as_raw()) {
-                    Ok(RawWindowHandle::Win32(h)) => Some(h.hwnd.get()),
-                    _ => None,
-                }
-            }).ok().flatten();
+            let hwnd = handle
+                .update(cx, |_, window, _| {
+                    match HasWindowHandle::window_handle(&*window).map(|h| h.as_raw()) {
+                        Ok(RawWindowHandle::Win32(h)) => Some(h.hwnd.get()),
+                        _ => None,
+                    }
+                })
+                .ok()
+                .flatten();
             // The update above has returned, so its UI borrow is released.
             // If a newer notification already removed this window, update
             // returns an error and no native call is made for its old HWND.
             if let Some(hwnd) = hwnd {
-                crate::native_window::configure_overlay_hwnd(hwnd,WIDTH as f64,height as f64,corner,MARGIN as f64);
+                crate::native_window::configure_overlay_hwnd(
+                    hwnd,
+                    WIDTH as f64,
+                    height as f64,
+                    corner,
+                    MARGIN as f64,
+                );
+                // Flush refresh effects even while the main window is inactive.
+                // This does not activate either the popup or the main window.
+                cx.refresh();
             }
-        }).detach();
+        })
+        .detach();
     }
 
     let any: AnyWindowHandle = handle.into();
