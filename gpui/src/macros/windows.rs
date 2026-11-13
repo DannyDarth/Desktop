@@ -434,7 +434,7 @@ pub(super) fn start(
     weak: Weak<Mutex<State>>,
     cancel: Arc<AtomicBool>,
     path: Option<PathBuf>,
-    catalog: Vec<(String, Vec<String>)>,
+    catalog: Arc<Mutex<Vec<GameTarget>>>,
 ) {
     focus::start(weak.clone(), cancel.clone(), catalog);
     physical::start(weak.clone());

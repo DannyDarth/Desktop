@@ -252,6 +252,7 @@ impl AppView {
         ));
         for game in self.games.iter().filter(|g| {
             g.installed
+                || g.executable_path.is_some()
                 || g.running
                 || scope.as_deref() == Some(&g.id)
                 || state
@@ -737,7 +738,9 @@ impl AppView {
                 .child(div().text_sm().child(format!("Active set: {active_name}. Editing: {scope_name}.")))
                 .child(div().text_sm().text_color(cx.theme().muted_foreground).child("Game sets switch automatically when games open or close. Configure another game from Games → Macros."))
                 .child(div().text_sm().text_color(cx.theme().muted_foreground).child("F8 saves a recording. Escape stops or cancels. Triggers keep their normal input action. Dedicated G-keys, extra vendor buttons and cursor/wheel movement need separate support."))
-                .child(scopes).child(activation)
+                .child(scopes)
+                .child(Button::new("macro-add-game").compact().label("Add game").disabled(busy).on_click(cx.listener(|this, _, _, cx| this.add_custom_game(cx))))
+                .child(activation)
                 .child(h_flex().gap_3().items_center().flex_wrap()
                     .child(Switch::new("macro-enable").checked(state.library.enabled).disabled(!cfg!(windows) || busy).on_change(cx.listener(|this, on: &bool, _, cx| { this.macro_engine.edit(|l| l.enabled = *on); cx.notify(); })))
                     .child("Enable automatic triggers")

@@ -49,3 +49,6 @@ mod tests {
         assert!(l.validate().is_ok());
     }
 }
+
+#[path = "../../../src/games/custom.rs"]
+pub mod custom_games;

@@ -162,6 +162,9 @@ impl RunningTracker {
                 .unwrap_or_else(|| process.name());
             if let Some(name) = name.to_str() {
                 self.matches.observe(name);
+                if let Some(path) = process.exe().and_then(|p| p.to_str()) {
+                    self.matches.observe_path(path);
+                }
             }
         }
         self.matches.finish_poll()
@@ -174,14 +177,22 @@ struct ProcessMatches {
     running: Vec<bool>,
     next_running: Vec<bool>,
     name_buffer: String,
+    paths: Vec<(String, usize)>,
 }
 
 impl ProcessMatches {
     fn new(catalog: Vec<Game>, macos: bool) -> Self {
         let mut executables: HashMap<String, Vec<usize>> = HashMap::new();
         let mut game_ids = Vec::with_capacity(catalog.len());
+        let mut paths = Vec::new();
         for (index, game) in catalog.into_iter().enumerate() {
+            if let Some(path) = &game.executable_path {
+                paths.push((path.clone(), index));
+            }
             for executable in game.executables {
+                if game.executable_path.is_some() {
+                    continue;
+                }
                 let name = executable_basename(&executable).to_ascii_lowercase();
                 if name.is_empty() {
                     continue;
@@ -213,6 +224,7 @@ impl ProcessMatches {
             running: vec![false; count],
             next_running: vec![false; count],
             name_buffer: String::new(),
+            paths,
         }
     }
 
@@ -220,6 +232,13 @@ impl ProcessMatches {
         self.next_running.fill(false);
     }
 
+    fn observe_path(&mut self, path: &str) {
+        for (expected, index) in &self.paths {
+            if crate::macros::paths_match(expected, path) {
+                self.next_running[*index] = true;
+            }
+        }
+    }
     fn observe(&mut self, name: &str) {
         // Reuse one buffer rather than allocating for every system process.
         self.name_buffer.clear();
@@ -292,6 +311,7 @@ mod tests {
 
     fn game(id: &str, executable: &str) -> Game {
         Game {
+            executable_path: None,
             id: id.into(),
             name: format!("Name {id}"),
             artwork: Some(format!("https://example.com/{id}.jpg")),
@@ -429,5 +449,18 @@ mod tests {
         let updates = poll(&mut matcher, &["shared.exe"]);
         assert_eq!(updates.len(), 2);
         assert!(updates.iter().all(|update| update.running == Some(true)));
+    }
+    #[test]
+    fn personal_executable_matches_only_its_selected_installation() {
+        let mut personal = game("custom:hd2", "helldivers2.exe");
+        personal.executable_path = Some(r"C:\Games\HD2\helldivers2.exe".into());
+        let mut matches = ProcessMatches::new(vec![personal], false);
+        matches.begin_poll();
+        matches.observe("helldivers2.exe");
+        assert!(!matches.next_running[0]);
+        matches.observe_path(r"D:\Other\helldivers2.exe");
+        assert!(!matches.next_running[0]);
+        matches.observe_path(r"C:\Games\HD2\HELLDIVERS2.EXE");
+        assert!(matches.next_running[0]);
     }
 }

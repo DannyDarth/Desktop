@@ -7,6 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod custom;
 mod install_scan;
 
 /// One catalog entry, mirroring the TS `Game` interface.
@@ -24,6 +25,8 @@ pub struct Game {
     pub riot_id: Option<String>,
     #[serde(default)]
     pub executables: Vec<String>,
+    #[serde(default)]
+    pub executable_path: Option<String>,
     #[serde(skip)]
     pub installed: bool,
     #[serde(skip)]
@@ -140,19 +143,61 @@ const GAMES_JSON: &str = include_str!("../../public/games.json");
 
 /// Load the catalog; `installed` starts false until a scan completes.
 pub fn load_catalog() -> Vec<Game> {
-    match serde_json::from_str::<GamesFile>(GAMES_JSON) {
+    let mut games = match serde_json::from_str::<GamesFile>(GAMES_JSON) {
         Ok(file) => file.games,
         Err(e) => {
             eprintln!("games catalog failed to parse: {e}");
             Vec::new()
         }
+    };
+    match custom::load() {
+        Ok(entries) => {
+            for e in entries {
+                let executable = e
+                    .path
+                    .rsplit(['\\', '/'])
+                    .next()
+                    .unwrap_or(&e.path)
+                    .to_string();
+                let installed = std::path::Path::new(&e.path).is_file();
+                games.push(Game {
+                    id: e.id,
+                    name: e.name,
+                    artwork: None,
+                    steam_app_id: None,
+                    epic_id: None,
+                    riot_id: None,
+                    executables: vec![executable],
+                    executable_path: Some(e.path),
+                    installed,
+                    running: false,
+                });
+            }
+        }
+        Err(e) => eprintln!("{e}"),
     }
+    games
+}
+pub fn macro_targets(games: &[Game]) -> Vec<crate::macros::GameTarget> {
+    games
+        .iter()
+        .map(|g| crate::macros::GameTarget {
+            id: g.id.clone(),
+            executables: g.executables.clone(),
+            path: g.executable_path.clone(),
+        })
+        .collect()
 }
 
 /// Refresh installed state from Steam, Epic, and Riot manifests. Blocking;
 /// callers must run this off the UI thread. Missing launchers clear old state.
 pub fn mark_installed(games: &mut [Game]) {
     install_scan::mark_installed(games);
+    for game in games {
+        if let Some(path) = &game.executable_path {
+            game.installed = std::path::Path::new(path).is_file();
+        }
+    }
 }
 
 #[cfg(test)]
@@ -206,6 +251,7 @@ mod tests {
     #[test]
     fn explicit_artwork_wins_over_steam() {
         let game = Game {
+            executable_path: None,
             id: "x".into(),
             name: "X".into(),
             artwork: Some("https://example.com/a.jpg".into()),

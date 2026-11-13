@@ -375,10 +375,43 @@ pub(super) struct State {
     pub finish_requested: bool,
     pub trigger_capture: Option<(usize, std::time::Instant)>,
 }
+#[derive(Clone, Debug)]
+pub struct GameTarget {
+    pub id: String,
+    pub executables: Vec<String>,
+    pub path: Option<String>,
+}
+impl GameTarget {
+    pub fn matches(&self, path: &str) -> bool {
+        if let Some(expected) = &self.path {
+            paths_match(expected, path)
+        } else {
+            let name = path.rsplit(['\\', '/']).next().unwrap_or(path);
+            self.executables
+                .iter()
+                .any(|e| e.eq_ignore_ascii_case(name))
+        }
+    }
+}
+fn normalized_path(path: &str) -> String {
+    let normalized = path.replace('\\', "/").to_lowercase();
+    if let Some(unc) = normalized.strip_prefix("//?/unc/") {
+        format!("//{unc}")
+    } else {
+        normalized
+            .strip_prefix("//?/")
+            .unwrap_or(&normalized)
+            .to_string()
+    }
+}
+pub fn paths_match(a: &str, b: &str) -> bool {
+    normalized_path(a) == normalized_path(b)
+}
 pub struct Engine {
     state: Arc<Mutex<State>>,
     cancel: Arc<AtomicBool>,
     path: Option<PathBuf>,
+    catalog: Arc<Mutex<Vec<GameTarget>>>,
 }
 impl Engine {
     pub fn load() -> Self {
@@ -414,18 +447,23 @@ impl Engine {
             })),
             cancel: Arc::new(AtomicBool::new(false)),
             path,
+            catalog: Arc::new(Mutex::new(Vec::new())),
         }
     }
-    pub fn start(&self, catalog: Vec<(String, Vec<String>)>) {
+    pub fn start(&self, catalog: Vec<GameTarget>) {
+        self.set_catalog(catalog);
         #[cfg(not(windows))]
-        let _ = &catalog;
+        let _ = &self.catalog;
         #[cfg(windows)]
         windows::start(
             Arc::downgrade(&self.state),
             self.cancel.clone(),
             self.path.clone(),
-            catalog,
+            self.catalog.clone(),
         );
+    }
+    pub fn set_catalog(&self, catalog: Vec<GameTarget>) {
+        *self.catalog.lock().unwrap() = catalog;
     }
     pub fn snapshot(&self) -> Snapshot {
         let state = self.state.lock().unwrap();
@@ -740,6 +778,7 @@ mod tests {
             })),
             cancel: Arc::new(AtomicBool::new(false)),
             path: None,
+            catalog: Arc::new(Mutex::new(Vec::new())),
         };
         let live = e.snapshot();
         assert_eq!(live.recorded_steps.len(), 1);
@@ -1030,5 +1069,21 @@ mod tests {
         assert!(parse_macro_name("  ").is_err());
         assert!(parse_macro_name(&"x".repeat(101)).is_err());
         assert!(parse_macro_name(&"é".repeat(100)).is_ok());
+    }
+    #[test]
+    fn custom_targets_match_exact_windows_paths_and_catalog_targets_match_names() {
+        let custom = GameTarget {
+            id: "custom:one".into(),
+            executables: vec!["helldivers2.exe".into()],
+            path: Some(r"C:\Games\HD2\helldivers2.exe".into()),
+        };
+        assert!(custom.matches(r"\\?\C:\Games\HD2\HELLDIVERS2.EXE"));
+        assert!(!custom.matches(r"D:\Other\helldivers2.exe"));
+        assert!(!custom.matches("helldivers2.exe"));
+        let built_in = GameTarget {
+            path: None,
+            ..custom
+        };
+        assert!(built_in.matches(r"D:\Other\HELLDIVERS2.EXE"));
     }
 }

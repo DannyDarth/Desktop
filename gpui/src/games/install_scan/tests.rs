@@ -70,6 +70,7 @@ impl Drop for Fixture {
 
 fn game(steam: Option<u32>, epic: Option<&str>, riot: Option<&str>) -> Game {
     Game {
+        executable_path: None,
         id: "fixture".into(),
         name: "Unrelated Display Name".into(),
         artwork: None,

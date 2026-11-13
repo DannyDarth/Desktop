@@ -1,5 +1,5 @@
 //! Fast foreground checks are independent of the slower installed/running scan.
-use super::super::{apply_active_game, choose_active_game, State};
+use super::super::{apply_active_game, choose_active_game, GameTarget, State};
 use std::sync::{atomic::AtomicBool, Arc, Mutex, Weak};
 #[link(name = "user32")]
 extern "system" {
@@ -39,21 +39,24 @@ fn foreground_executable() -> Option<String> {
         return None;
     }
     let path = String::from_utf16_lossy(&buffer[..size as usize]);
-    path.rsplit(['\\', '/']).next().map(str::to_owned)
+    Some(path)
 }
 pub(super) fn start(
     weak: Weak<Mutex<State>>,
     cancel: Arc<AtomicBool>,
-    catalog: Vec<(String, Vec<String>)>,
+    catalog: Arc<Mutex<Vec<GameTarget>>>,
 ) {
     std::thread::spawn(move || {
         while let Some(state) = weak.upgrade() {
             let executable = foreground_executable();
-            let focused = executable.as_deref().and_then(|exe| {
+            let focused = executable.as_deref().and_then(|path| {
+                let catalog = catalog.lock().unwrap();
                 catalog
                     .iter()
-                    .find(|(_, names)| names.iter().any(|name| name.eq_ignore_ascii_case(exe)))
-                    .map(|(id, _)| id.clone())
+                    .filter(|g| g.path.is_some())
+                    .chain(catalog.iter().filter(|g| g.path.is_none()))
+                    .find(|g| g.matches(path))
+                    .map(|g| g.id.clone())
             });
             {
                 let mut s = state.lock().unwrap();

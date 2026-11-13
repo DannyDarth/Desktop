@@ -1,4 +1,5 @@
 mod macros_view;
+mod custom_games_view;
 use crate::games::{self, Game};
 use crate::settings::{Settings, MAX_BLUR, MAX_VIBRANCY, MIN_OPACITY};
 use crate::theme::ThemeChoice;
@@ -658,7 +659,7 @@ impl AppView {
         if view.settings.discord_presence {
             view.set_discord(true, cx);
         }
-        view.macro_engine.start(view.games.iter().map(|g| (g.id.clone(), g.executables.clone())).collect());
+        view.macro_engine.start(games::macro_targets(&view.games));
         cx.spawn(async move |view, cx| {
             loop {
                 futures_timer::Delay::new(Duration::from_millis(150)).await;
@@ -4004,7 +4005,7 @@ impl AppView {
     /// falls back to a name-initial tile until prefetch completes.
     fn render_games(&self, cx: &mut Context<Self>) -> AnyElement {
         let (installed, rest): (Vec<&Game>, Vec<&Game>) =
-            self.games.iter().partition(|g| g.installed || g.running);
+            self.games.iter().partition(|g| g.installed || g.running || g.executable_path.is_some());
         let running = self.games.iter().filter(|g| g.running).count();
         let profiles = self.games.iter().filter(|g| self.profiles.has_any(&g.id)).count();
         let fg = cx.theme().foreground;
@@ -4033,6 +4034,7 @@ impl AppView {
                     .child(div().text_xl().font_weight(FontWeight::SEMIBOLD).text_color(fg).child("Games"))
                     .child(div().text_sm().text_color(muted).child(subtitle)),
             )
+            .child(Button::new("add-custom-game").label("Add game").on_click(cx.listener(|this, _, _, cx| this.add_custom_game(cx))))
             .child(self.render_game_section(cx, "Installed & running", "Pick a game to give it its own mouse profile.", &installed, false))
             .child(self.render_game_section(cx, "More games", "Not found on this PC. Profiles you set up still apply once they are installed.", &rest, true))
             .into_any_element()

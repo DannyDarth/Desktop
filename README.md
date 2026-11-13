@@ -80,8 +80,7 @@ This first version uses ordinary Windows keyboard and mouse input, so a G915 X
 can trigger keys/shortcuts and a G903 can trigger standard Windows mouse
 buttons without relying on onboard Logitech macro support. Triggers retain
 their normal key/click action. Dedicated G-keys, additional vendor-specific
-buttons, wheel/cursor movement, remapping/suppressing triggers, custom game
-executables and hardware-specific validation are not included yet. Windows can
+buttons, wheel/cursor movement, remapping/suppressing triggers, hardware-specific validation are not included yet. Windows can
 reject input into an elevated application; the app reports rejected playback.
 
 Engine checks without the GUI toolchain:
@@ -150,8 +149,7 @@ Foreground checks run about every 100 ms, independently of the slower process
 scan. This option is saved per game. **While running** remains the default for
 existing profiles and retains their behavior when alt-tabbing. This controls
 macro sets; existing device DPI/onboard game profiles keep their existing
-process-based switching. Game detection still uses the current executable
-catalog; custom executable selection is not included in this change.
+process-based switching. Game detection supports both the bundled catalog and locally added executable paths.
 
 ## Editing names and exact delays
 
@@ -164,3 +162,21 @@ Press Enter or click away to save either edit. Escape cancels it. Invalid input
 shows an inline error and does not replace the saved value. Typing in a delay
 field does not start a row drag. Delay edits apply to the selected Sequence
 section when using Sequence mode.
+
+
+## Add any game executable
+
+Choose **Add game** on Games or Macros, then select the game's actual `.exe`.
+OpenMouse saves a personal entry in `%APPDATA%\openmouse\custom-games.json`
+and opens its macro set immediately. This does not launch the executable or
+require a new app build. Select **While running** or **While focused** for that
+set as usual. The initial display name comes from the executable filename.
+
+Custom entries match the selected executable's full path, so an unrelated app
+with the same filename does not activate the profile. Adding the same path
+again reopens its existing set instead of creating a duplicate. Entries survive
+restarts and future portable/installer updates; they remain separate from the
+bundled catalog. If a game is moved to another folder, add its new executable
+path. Choose the game's executable rather than Steam, another launcher, or a
+`.lnk` shortcut. Game artwork lookup is deferred; personal entries use the
+existing name-initial placeholder for now.
