@@ -341,3 +341,57 @@ mod tests {
         assert_eq!(game.art_url().as_deref(), Some("https://example.com/a.jpg"));
     }
 }
+
+/// Human-readable notification title; never changes a saved profile or its identity.
+pub fn notification_title(name: &str) -> String {
+    let name = name.trim();
+    let stem = if name.to_ascii_lowercase().ends_with(".exe") {
+        &name[..name.len() - 4]
+    } else { name };
+    let identity: String = stem.chars().filter(|c| c.is_alphanumeric()).flat_map(char::to_lowercase).collect();
+    if identity == "helldivers2" { return "HellDivers 2".into(); }
+    if stem.contains(' ') && !stem.contains(['_', '-']) && stem.chars().any(char::is_uppercase) {
+        return stem.split_whitespace().collect::<Vec<_>>().join(" ");
+    }
+    let mut spaced = String::new();
+    let mut previous = None;
+    for c in stem.chars() {
+        if c == '_' || c == '-' || c.is_whitespace() {
+            if !spaced.is_empty() && !spaced.ends_with(' ') { spaced.push(' '); }
+            previous = None;
+            continue;
+        }
+        if previous.is_some_and(|p: char| p.is_alphabetic() && c.is_ascii_digit()) {
+            spaced.push(' ');
+        }
+        spaced.push(c);
+        previous = Some(c);
+    }
+    spaced.trim().split_whitespace().map(|word| {
+        // Preserve existing capitalization, including acronyms and branded names.
+        if word.chars().any(char::is_uppercase) { return word.to_string(); }
+        let mut chars = word.chars();
+        match chars.next() {
+            Some(first) => first.to_uppercase().chain(chars).collect(),
+            None => String::new(),
+        }
+    }).collect::<Vec<_>>().join(" ")
+}
+
+#[cfg(test)]
+mod notification_title_tests {
+    use super::notification_title;
+    #[test]
+    fn readable_titles_preserve_existing_branding() {
+        for (raw, expected) in [
+            ("helldivers2", "HellDivers 2"),
+            ("HELLDIVERS 2", "HellDivers 2"),
+            ("helldivers2.exe", "HellDivers 2"),
+            ("counter_strike-2", "Counter Strike 2"),
+            ("portal2", "Portal 2"),
+            ("GTA V", "GTA V"),
+            ("Cyberpunk 2077", "Cyberpunk 2077"),
+            ("  Sea of Thieves  ", "Sea of Thieves"),
+        ] { assert_eq!(notification_title(raw), expected); }
+    }
+}

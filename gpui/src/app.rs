@@ -1552,7 +1552,7 @@ impl AppView {
             self.macro_scope = state.active_game.clone(); self.macro_selected = None; self.macro_text_edit = None;
             if self.settings.overlay_enabled {
                 let (title, subtitle, detail) = match state.active_game.as_deref() {
-                    Some(id) => (self.game_name(id), if state.library.enabled { "Macro profile active" } else { "Macro profile selected" },
+                    Some(id) => (crate::games::notification_title(&self.game_name(id)), if state.library.enabled { "Macro profile active" } else { "Macro profile selected" },
                         if !state.library.enabled { "Automatic triggers off" } else if state.library.focus_only.contains(id) { "While focused" } else { "While running" }),
                     None => ("Default profile".to_string(), if state.library.enabled { "Desktop macros active" } else { "Desktop profile selected" },
                         if state.library.enabled { "Game is no longer focused" } else { "Automatic triggers off" }),
