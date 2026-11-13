@@ -47,6 +47,12 @@ pub(super) fn start(
     catalog: Arc<Mutex<Vec<GameTarget>>>,
 ) {
     std::thread::spawn(move || {
+        let mut gate = super::super::focus_gate::DesktopFocusGate::default();
+        let mut windows =
+            super::physical::activations(0x5b, None) + super::physical::activations(0x5c, None);
+        let mut escape = super::physical::activations(0x1b, None);
+        let mut clicks = super::physical::foreground_clicks();
+        let mut previous_game = None;
         while let Some(state) = weak.upgrade() {
             let executable = foreground_executable();
             let focused = executable.as_deref().and_then(|path| {
@@ -58,6 +64,24 @@ pub(super) fn start(
                     .find(|g| g.matches(path))
                     .map(|g| g.id.clone())
             });
+            let next_windows =
+                super::physical::activations(0x5b, None) + super::physical::activations(0x5c, None);
+            let next_escape = super::physical::activations(0x1b, None);
+            let next_clicks = super::physical::foreground_clicks();
+            let game_changed =
+                focused.is_some() && previous_game.is_some() && focused != previous_game;
+            let has_focus = gate.game_focused(
+                focused.is_some(),
+                next_windows != windows,
+                super::physical::down(0x5b) || super::physical::down(0x5c),
+                next_escape != escape || next_clicks != clicks || game_changed,
+                std::time::Instant::now(),
+            );
+            windows = next_windows;
+            escape = next_escape;
+            clicks = next_clicks;
+            previous_game = focused.clone();
+            let focused = if has_focus { focused } else { None };
             {
                 let mut s = state.lock().unwrap();
                 s.snapshot.focused_game = focused;

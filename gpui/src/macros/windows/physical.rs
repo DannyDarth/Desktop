@@ -10,6 +10,7 @@ struct Inputs {
     presses: [AtomicU64; 256],
     bindings: [AtomicU64; 4096],
     ready: AtomicBool,
+    foreground_clicks: AtomicU64,
 }
 static INPUTS: OnceLock<Inputs> = OnceLock::new();
 fn inputs() -> &'static Inputs {
@@ -18,6 +19,7 @@ fn inputs() -> &'static Inputs {
         presses: std::array::from_fn(|_| AtomicU64::new(0)),
         bindings: std::array::from_fn(|_| AtomicU64::new(0)),
         ready: AtomicBool::new(false),
+        foreground_clicks: AtomicU64::new(0),
     })
 }
 fn update(code: usize, down: bool) {
@@ -66,7 +68,7 @@ struct Keyboard {
     extra: usize,
 }
 #[repr(C)]
-#[derive(Default)]
+#[derive(Clone, Copy, Default)]
 struct Point {
     x: i32,
     y: i32,
@@ -104,6 +106,9 @@ extern "system" {
     fn TranslateMessage(msg: *const Message) -> i32;
     fn DispatchMessageW(msg: *const Message) -> isize;
     fn GetAsyncKeyState(key: i32) -> i16;
+    fn GetForegroundWindow() -> isize;
+    fn WindowFromPoint(point: Point) -> isize;
+    fn GetAncestor(hwnd: isize, flags: u32) -> isize;
 }
 #[link(name = "kernel32")]
 extern "system" {
@@ -158,11 +163,21 @@ unsafe extern "system" fn mouse(code: i32, wp: usize, lp: isize) -> isize {
                 _ => None,
             };
             if let Some(key) = key {
+                if wp == 0x201 {
+                    let hit = unsafe { GetAncestor(WindowFromPoint(event.point), 2) };
+                    let foreground = unsafe { GetAncestor(GetForegroundWindow(), 2) };
+                    if hit != 0 && hit == foreground {
+                        inputs().foreground_clicks.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
                 update(key, matches!(wp, 0x201 | 0x204 | 0x207 | 0x20b));
             }
         }
     }
     unsafe { CallNextHookEx(0, code, wp, lp) }
+}
+pub(super) fn foreground_clicks() -> u64 {
+    inputs().foreground_clicks.load(Ordering::SeqCst)
 }
 pub(super) fn ready() -> bool {
     inputs().ready.load(Ordering::SeqCst)

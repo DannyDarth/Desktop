@@ -1,4 +1,5 @@
 //! Windows software macros. No device firmware or onboard profiles are written.
+mod focus_gate;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashSet,
