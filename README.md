@@ -180,3 +180,17 @@ bundled catalog. If a game is moved to another folder, add its new executable
 path. Choose the game's executable rather than Steam, another launcher, or a
 `.lnk` shortcut. Game artwork lookup is deferred; personal entries use the
 existing name-initial placeholder for now.
+
+## Macro profile notifications
+
+A medium notification appears in the upper-right corner when the active macro
+set changes. It shows the game's name and While focused/While running, or
+Desktop and the Default profile when switching back. It disappears after three
+seconds, is click-through, and opens without taking focus. New messages replace
+old ones rather than stacking. Unchanged polling results do not repeat it.
+
+When automatic triggers are off, the message says profile selected and notes
+that triggers are off. The existing game-notification switch in Settings
+controls these popups too. Profile notices are silent. Native desktop overlays
+may not appear above a game's exclusive-fullscreen presentation; borderless
+windowed mode allows normal desktop overlays.

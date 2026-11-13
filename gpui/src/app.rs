@@ -664,10 +664,7 @@ impl AppView {
             loop {
                 futures_timer::Delay::new(Duration::from_millis(150)).await;
                 if view.update(cx, |v, cx| {
-                    let active = v.macro_engine.snapshot().active_game;
-                    if active != v.macro_last_active {
-                        v.macro_last_active = active.clone(); v.macro_scope = active; v.macro_selected = None; v.macro_text_edit = None; cx.notify();
-                    }
+                    v.sync_macro_profile_notice(cx);
                     if v.page == Page::Macros { cx.notify(); }
                 }).is_err() { break; }
             }
@@ -1433,18 +1430,14 @@ impl AppView {
         }
         let mut running: Vec<String> = self.games.iter().filter(|g| g.running && !started.contains(&g.id)).map(|g| g.id.clone()).collect();
         running.extend(started.iter().cloned());
-        if self.macro_engine.sync_games(running) {
-            self.macro_scope = self.macro_engine.snapshot().active_game;
-            self.macro_last_active = self.macro_scope.clone();
-            self.macro_selected = None;
-            cx.notify();
-        }
+        let macro_changed = self.macro_engine.sync_games(running);
         for id in closed {
             self.on_game_closed(&id, cx);
         }
         for id in started {
             self.on_game_started(&id, cx);
         }
+        if macro_changed { self.sync_macro_profile_notice(cx); }
     }
 
     // ── toasts ───────────────────────────────────────────────────────────
@@ -1464,6 +1457,24 @@ impl AppView {
             });
         })
         .detach();
+    }
+
+    /// Profile changes share one overlay slot and never repeat on unchanged polls.
+    fn sync_macro_profile_notice(&mut self, cx: &mut Context<Self>) {
+        let state = self.macro_engine.snapshot();
+        if state.active_game == self.macro_last_active { return; }
+        self.macro_last_active = state.active_game.clone();
+        self.macro_scope = state.active_game.clone(); self.macro_selected = None; self.macro_text_edit = None;
+        if self.settings.overlay_enabled {
+            let (title, subtitle, detail) = match state.active_game.as_deref() {
+                Some(id) => (self.game_name(id), if state.library.enabled { "Macro profile active" } else { "Macro profile selected" },
+                    if !state.library.enabled { "Automatic triggers off" } else if state.library.focus_only.contains(id) { "While focused" } else { "While running" }),
+                None => ("Desktop".to_string(), if state.library.enabled { "Default profile active" } else { "Default profile selected" },
+                    if state.library.enabled { "Default macros" } else { "Automatic triggers off" }),
+            };
+            self.overlay = crate::overlay::show_profile(cx, self.overlay.take(), crate::overlay::ProfileNotice { title, subtitle: subtitle.into(), detail: detail.into() });
+        }
+        cx.notify();
     }
 
     /// A message about a game: on the screen overlay (the game has focus, so
