@@ -67,7 +67,7 @@ impl AppView {
         })
         .detach();
     }
-    fn render_game_art_actions(&self, id: &str, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_game_art_actions(&self, id: &str, cx: &mut Context<Self>) -> AnyElement {
         let choose_id = id.to_owned();
         let fetch_id = id.to_owned();
         h_flex()
