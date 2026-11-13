@@ -1,3 +1,4 @@
+import { LOGITECH_RECEIVER_PRODUCTS } from "@openmouse/keyboard-protocol/logitech";
 import { keyboardArt } from "./native-hid/keyboard-art";
 import { keyboardTabs, writeKeyboardLighting, keyboardCycleNote, takeKeyboardCycleErrors } from "./native-hid/keyboard-lighting";
 // Entry for the JS bundle embedded in the GPUI app (see build.mjs). Exposes
@@ -67,6 +68,7 @@ const mockWanted = (): string => String((globalThis as any).__mock ?? "");
     if (!candidate) throw new Error(`Unknown interface ${key}; list candidates first.`);
     const mock = isMockKey(key);
     const device = mock ? { key, brand: mockBrand(key), driver: "Mock", status: mockStatus(key) as any } : await connectToInterface(candidate.info);
+    (device.status as any).firmwareContext = {receiverConnected:candidate.info.vendorId===0x046d && LOGITECH_RECEIVER_PRODUCTS.has(candidate.info.productId)};
     if ((device as any).kind === "keyboard") {
       const status: any = device.status;
       // The keyboard status is kept intact. Do not manufacture mouse settings

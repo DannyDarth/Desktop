@@ -1,5 +1,6 @@
 mod macros_view;
 mod custom_games_view;
+mod firmware_view;
 use crate::games::{self, Game};
 use crate::settings::{Settings, MAX_BLUR, MAX_VIBRANCY, MIN_OPACITY};
 use crate::theme::ThemeChoice;
@@ -312,6 +313,7 @@ enum DeviceTab {
     Advanced,
     /// The mouse's own stored profiles (Logitech).
     Profiles,
+    Firmware,
 }
 
 impl DeviceTab {
@@ -322,6 +324,7 @@ impl DeviceTab {
             DeviceTab::Lighting => "Lighting",
             DeviceTab::Advanced => "Advanced",
             DeviceTab::Profiles => "Profiles",
+            DeviceTab::Firmware => "Firmware",
         }
     }
 }
@@ -409,6 +412,7 @@ struct DeviceReadout {
     polling_hz: Option<f64>,
     connection: Option<String>,
     firmware: Vec<String>,
+    firmware_info: crate::firmware::FirmwareInfo,
 }
 
 impl DeviceReadout {
@@ -422,6 +426,7 @@ impl DeviceReadout {
         };
         let ui_flag = |k: &str| s.get("ui").and_then(|u| u.get(k)).and_then(|v| v.as_bool()).unwrap_or(false);
         Self {
+            firmware_info: crate::firmware::FirmwareInfo::from_status(s),
             dpi_y: num("dpiY"),
             separate_axes: s.get("supportsSeparateDpiAxes").and_then(|v| v.as_bool()).unwrap_or(false),
             polling_read_only: ui_flag("pollingReadOnly"),
@@ -473,6 +478,7 @@ pub struct AppView {
     macro_last_active: Option<String>,
     macro_text_edit: Option<macros_view::MacroTextEdit>,
     game_delete_pending: Option<String>,
+    firmware_checks: std::collections::HashMap<String,crate::firmware::CheckState>,
     game_art_busy: bool,
     macro_selected: Option<usize>,
     games: Vec<Game>,
@@ -625,6 +631,7 @@ impl AppView {
             macro_last_active: None,
             macro_text_edit: None,
             game_delete_pending: None,
+            firmware_checks: Default::default(),
             game_art_busy: false,
             macro_selected: None,
             sidebar_collapsed: false,
@@ -699,6 +706,7 @@ impl Default for AppView {
             macro_last_active: None,
             macro_text_edit: None,
             game_delete_pending: None,
+            firmware_checks: Default::default(),
             game_art_busy: false,
             macro_selected: None,
             sidebar_collapsed: false,
@@ -1441,6 +1449,7 @@ impl AppView {
                 }
                 if connected_now {
                     v.sync_running_profiles(cx);
+                    v.check_firmware_source(key.clone(),cx);
                 }
                 v.connect_next_device(cx);
                 v.refresh_presence(cx);
@@ -3158,6 +3167,7 @@ impl AppView {
         };
 
         let content: AnyElement = match &tile.status {
+            TileStatus::Connected(r) if self.devices.tab == DeviceTab::Firmware => self.render_firmware(tile,r,cx),
             TileStatus::Connected(r) if r.keyboard => {
                 let mut col = div().flex().flex_col().gap_3().w_full().min_w_0().max_w(px(720.))
                     .child(div().text_lg().child(if self.devices.tab == DeviceTab::Advanced { "Keyboard details" } else { "Keyboard lighting" }))
@@ -3397,6 +3407,7 @@ impl AppView {
             (DeviceTab::Lighting, has_lighting),
             (DeviceTab::Advanced, has_advanced),
             (DeviceTab::Profiles, has_profiles),
+            (DeviceTab::Firmware, true),
         ]
         .into_iter()
         .filter_map(|(tab, shown)| shown.then_some(tab))

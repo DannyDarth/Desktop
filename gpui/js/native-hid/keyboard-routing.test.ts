@@ -82,3 +82,12 @@ const failedCycle=new KeyboardCycle(async()=>{throw new Error("Disconnected")},(
 failedCycle.start(); scheduled!(); await new Promise(r=>setImmediate(r));
 assert.equal(failures,1,"Disconnected devices stop instead of being retried indefinitely");
 console.log("App-driven cycling checks passed (RGB wheel, sequential frames, cancellation and failure).");
+
+const {readLogitechFirmwareDetails}=await import("./firmware-info");
+const entity=new Uint8Array([0,75,66,68,0x01,0x10,0x00,0x12,1]);
+const keyboardClient={getFeature:async()=>3,request:async(_index:number,fn:number)=>fn===0 ? new Uint8Array([1]) : entity};
+const decoded=await readLogitechFirmwareDetails(keyboardClient,true);
+assert.equal(decoded[0].prefix,"KBD");assert.equal(decoded[0].version,"1.10");assert.equal(decoded[0].build,12);
+const mouseClient={getFeature:async()=>({index:3}),request:async(_index:number,fn:number)=>new Uint8Array([0,0,0,...(fn===0 ? [1] : entity)])};
+assert.deepEqual(await readLogitechFirmwareDetails(mouseClient,false),decoded);
+console.log("Firmware entity checks passed (keyboard/mouse reports and full build number).");

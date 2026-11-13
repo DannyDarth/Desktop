@@ -20,3 +20,5 @@ pub mod update_check;
 mod wallpaper_win;
 
 pub mod macros;
+
+pub mod firmware;

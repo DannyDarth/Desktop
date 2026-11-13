@@ -91,3 +91,6 @@ pub mod proc;
 
 #[path = "../../../src/profiles.rs"]
 pub mod profiles;
+
+#[path = "../../../src/firmware.rs"]
+pub mod firmware;
