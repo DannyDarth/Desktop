@@ -2256,12 +2256,9 @@ impl AppView {
 
     fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let collapsed = self.sidebar_collapsed;
-        let fg = cx.theme().foreground;
-        let border = cx.theme().border;
-        let accent = cx.theme().primary;
 
         let mut nav = div().flex().flex_col().gap_1();
-        for (id, page) in [("nav-overview", Page::Overview), ("nav-games", Page::Games), ("nav-macros", Page::Macros), ("nav-supported", Page::Supported)] {
+        for (id, page) in [("nav-overview", Page::Overview), ("nav-games", Page::Games), ("nav-macros", Page::Macros), ("nav-settings", Page::Settings)] {
             nav = nav.child(self.nav_row(id, page.icon(), page.label(), self.page == page, collapsed, cx).on_click(
                 cx.listener(move |this, _, _, cx| {
                     // Choosing the page you are on goes back to its top level.
@@ -2276,41 +2273,6 @@ impl AppView {
             ));
         }
 
-        let discord = img(themed_discord(cx.theme().muted_foreground)).w(px(22.)).h(px(17.)).into_any_element();
-        let on_updates = self.page == Page::Updates;
-        let on_settings = self.page == Page::Settings;
-        let tone = |active: bool| if active { accent } else { cx.theme().muted_foreground };
-        let updates_icon = Icon::new(Page::Updates.icon()).size(px(18.)).text_color(tone(on_updates)).into_any_element();
-        let gear = Icon::new(Page::Settings.icon()).size(px(18.)).text_color(tone(on_settings)).into_any_element();
-        let footer = div()
-            .flex()
-            .flex_col()
-            .rounded_xl()
-            .border_1()
-            .border_color(Hsla { a: 0.8, ..border })
-            .bg(Hsla { a: 0.04, ..fg })
-            .overflow_hidden()
-            .child(
-                self.footer_row("footer-updates", updates_icon, "Updates", Some(&format!("v{APP_VERSION} · Release notes")), on_updates, collapsed, cx)
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.page = Page::Updates;
-                        cx.notify();
-                    })),
-            )
-            .child(div().h(px(1.)).w_full().bg(Hsla { a: 0.8, ..border }))
-            .child(
-                self.footer_row("footer-discord", discord, "Help & Feedback", Some("Join the community server"), false, collapsed, cx)
-                    .on_click(cx.listener(|_, _, _, cx| cx.open_url(DISCORD_INVITE_URL))),
-            )
-            .child(div().h(px(1.)).w_full().bg(Hsla { a: 0.8, ..border }))
-            .child(
-                self.footer_row("footer-settings", gear, Page::Settings.label(), None, self.page == Page::Settings, collapsed, cx)
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.page = Page::Settings;
-                        cx.notify();
-                    })),
-            );
-        let _ = accent;
 
         div()
             .flex()
@@ -2324,7 +2286,6 @@ impl AppView {
             .gap_6()
             .child(nav)
             .child(div().flex_1())
-            .child(footer)
     }
 
     fn render_titlebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
