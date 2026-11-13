@@ -207,25 +207,25 @@ fn show_window(
     configure_overlay(WIDTH as f64, height as f64, corner, MARGIN as f64);
     #[cfg(windows)]
     {
-        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-        let hwnd = handle
-            .update(cx, |_, window, _| {
+        // SetWindowPos/SetWindowLongPtr synchronously dispatch Win32 messages.
+        // Never call them while the caller holds App/Context's RefCell borrow:
+        // GPUI's window procedure re-enters AsyncApp::update_window.
+        cx.spawn(async move |cx| {
+            cx.background_executor().timer(Duration::from_millis(1)).await;
+            use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+            let hwnd = handle.update(cx, |_, window, _| {
                 match HasWindowHandle::window_handle(&*window).map(|h| h.as_raw()) {
                     Ok(RawWindowHandle::Win32(h)) => Some(h.hwnd.get()),
                     _ => None,
                 }
-            })
-            .ok()
-            .flatten();
-        if let Some(hwnd) = hwnd {
-            crate::native_window::configure_overlay_hwnd(
-                hwnd,
-                WIDTH as f64,
-                height as f64,
-                corner,
-                MARGIN as f64,
-            );
-        }
+            }).ok().flatten();
+            // The update above has returned, so its UI borrow is released.
+            // If a newer notification already removed this window, update
+            // returns an error and no native call is made for its old HWND.
+            if let Some(hwnd) = hwnd {
+                crate::native_window::configure_overlay_hwnd(hwnd,WIDTH as f64,height as f64,corner,MARGIN as f64);
+            }
+        }).detach();
     }
 
     let any: AnyWindowHandle = handle.into();

@@ -30,6 +30,7 @@ struct MonitorInfo {
 #[link(name = "user32")]
 extern "system" {
     fn GetForegroundWindow() -> isize;
+    fn IsWindow(hwnd:isize)->i32;
     fn MonitorFromWindow(hwnd: isize, flags: u32) -> isize;
     fn GetMonitorInfoW(monitor: isize, info: *mut MonitorInfo) -> i32;
     fn GetWindowLongPtrW(hwnd: isize, index: i32) -> isize;
@@ -64,6 +65,7 @@ const LWA_ALPHA: u32 = 0x2;
 /// logical pixels.
 pub fn configure_overlay_hwnd(hwnd: isize, width: f64, height: f64, corner: OverlayCorner, margin: f64) {
     unsafe {
+        if hwnd == 0 || IsWindow(hwnd) == 0 {return;}
         // Never let a click reach the overlay or activate it: layered + transparent
         // is what makes the mouse pass through to a window of another process.
         let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
