@@ -224,12 +224,12 @@ impl AppView {
         let scope = self.macro_scope.clone();
         let scope_name = scope
             .as_deref()
-            .map(|id| self.game_name(id))
+            .map(|id| crate::games::notification_title(&self.game_name(id)))
             .unwrap_or_else(|| "Default".into());
         let active_name = state
             .active_game
             .as_deref()
-            .map(|id| self.game_name(id))
+            .map(|id| crate::games::notification_title(&self.game_name(id)))
             .unwrap_or_else(|| "Default".into());
         let busy = state.playing || state.recording.is_some() || state.assigning.is_some();
         let selected = self.macro_selected.filter(|i| {
@@ -238,7 +238,8 @@ impl AppView {
                 .macros
                 .get(*i)
                 .is_some_and(|m| m.game_id == scope)
-        });
+        }).or_else(|| state.library.macros.iter().position(|m| m.game_id == scope));
+        let macro_count = state.library.macros.iter().filter(|m| m.game_id == scope).count();
         let mut scopes = h_flex().gap_2().flex_wrap().child(self.chip(
             "macro-default".into(),
             "Default".into(),
@@ -265,7 +266,7 @@ impl AppView {
             let mut chip = self
                 .chip(
                     format!("macro-game-{id}"),
-                    game.name.clone(),
+                    crate::games::notification_title(&game.name),
                     scope.as_deref() == Some(&id),
                     cx,
                     move |this, cx| {
@@ -325,31 +326,31 @@ impl AppView {
             .enumerate()
             .filter(|(_, m)| m.game_id == scope)
         {
+            let count = if state.recording == Some(i) {
+                state.recorded_steps.len()
+            } else { m.event_count() };
             list = list.child(self.chip(
                 format!("macro-{i}"),
-                format!(
-                    "{} · {} · {} steps",
-                    m.name,
-                    m.trigger.label(),
-                    if state.recording == Some(i) {
-                        state.recorded_steps.len()
-                    } else {
-                        m.event_count()
-                    }
-                ),
+                String::new(),
                 selected == Some(i),
                 cx,
                 move |this, cx| {
+                    this.macro_text_edit = None;
                     this.macro_engine.select_section(Section::Repeat);
                     this.macro_selected = Some(i);
                     cx.notify();
                 },
-            ));
+            ).w_full().min_w_0().py_3().flex().flex_col().gap_1()
+                .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(m.name.clone()))
+                .child(div().text_xs().text_color(cx.theme().muted_foreground)
+                    .child(format!("{} · {count} steps", m.trigger.label())))
+                .when(state.recording == Some(i), |card| card.child(
+                    div().text_xs().text_color(cx.theme().danger).child("Recording…"))));
         }
         if !state.library.macros.iter().any(|m| m.game_id == scope) {
             list = list.child(div().text_sm().child("No macros in this set. Add a macro, then record its keyboard presses and mouse clicks."));
         }
-        let mut editor = div().flex().flex_col().gap_3();
+        let mut editor = div().flex().flex_col().gap_3().min_w_0();
         if let Some(i) = selected {
             let m = &state.library.macros[i];
             let section = if m.mode == MacroMode::Sequence {
@@ -444,7 +445,7 @@ impl AppView {
                                 })),
                         ),
                 )
-                .child(div().text_sm().child("Activation"));
+                .child(div().text_sm().child("Activation input"));
             let trigger_row = h_flex()
                 .gap_3()
                 .items_center()
@@ -616,6 +617,14 @@ impl AppView {
                 }
                 editor = editor.child(live);
             } else {
+                editor = editor.child(h_flex().justify_between().items_center().gap_2()
+                    .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(format!("Steps · {}", steps.len())))
+                    .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Delay before input")));
+                if steps.is_empty() {
+                    editor = editor.child(div().p_4().border_1().border_color(cx.theme().border)
+                        .rounded(cx.theme().radius).text_sm().text_color(cx.theme().muted_foreground)
+                        .child("No steps yet. Choose Record input, perform your actions, then press F8 to save."));
+                }
                 editor = editor.child(div().text_xs().text_color(cx.theme().muted_foreground)
                     .child("Drag a row to reorder it. Drop on the green line. Delays move with their events."));
                 let dragged_steps: std::sync::Arc<[crate::macros::Step]> = steps.to_vec().into();
@@ -741,9 +750,34 @@ impl AppView {
                 ));
                 editor = editor.child(rows);
             }
+        } else {
+            editor = editor.child(div().flex().flex_col().gap_2().py_6()
+                .child(div().text_base().font_weight(FontWeight::SEMIBOLD).child("Create your first macro"))
+                .child(div().text_sm().text_color(cx.theme().muted_foreground)
+                    .child("Choose Add macro, assign an input, then record the steps. Your changes save automatically.")));
         }
+        let add_macro = Button::new("macro-add").label("Add macro").disabled(busy || state.library.macros.len() >= 64).on_click(cx.listener(move |this, _, _, cx| {
+                        let library = this.macro_engine.snapshot().library;
+                        let trigger = (0x70..=0x7b).filter(|k| *k != 0x77).map(|key| Trigger::Shortcut { key }).chain([Trigger::Mouse { button: 4 }, Trigger::Mouse { button: 5 }]).chain((0x7c..=0x87).map(|code| Trigger::Key { code, modifiers: 0 })).chain((0x41..=0x5a).map(|code| Trigger::Key { code, modifiers: 0 })).find(|t| !library.macros.iter().any(|m| m.game_id == scope && m.trigger.same_input(t)));
+                        if let Some(trigger) = trigger { let i = library.macros.len(); this.macro_engine.edit(|l| l.macros.push(Macro { mode: MacroMode::NoRepeat, on_press: vec![], on_release: vec![], game_id: scope.clone(), name: format!("Macro {}", i + 1), trigger, repeats: 1, steps: Vec::new() })); this.macro_selected = Some(i); }
+                        cx.notify();
+                    }));
+        let saved_panel = div().flex().flex_col().gap_3().w(px(260.)).flex_shrink_0()
+            .p_4().border_1().border_color(cx.theme().border).rounded(cx.theme().radius)
+            .bg(cx.theme().sidebar)
+            .child(h_flex().justify_between().items_center()
+                .child(div().text_base().font_weight(FontWeight::SEMIBOLD).child("Saved macros"))
+                .child(div().text_xs().text_color(cx.theme().muted_foreground).child(macro_count.to_string())))
+            .child(add_macro).child(list);
+        let editor_panel = div().flex_1().min_w(px(460.)).p_4()
+            .border_1().border_color(cx.theme().border).rounded(cx.theme().radius)
+            .child(div().flex().flex_col().gap_4()
+                .child(h_flex().justify_between().items_center().flex_wrap().gap_2()
+                    .child(div().text_base().font_weight(FontWeight::SEMIBOLD).child("Step editor"))
+                    .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Changes save automatically")))
+                .child(editor));
         div().id("macros-page").size_full().overflow_y_scroll().p(px(PAGE_PAD)).child(
-            div().flex().flex_col().gap_4().max_w(px(1000.))
+            div().flex().flex_col().gap_4().w_full().max_w(px(1280.))
                 .child(div().text_xl().font_weight(FontWeight::SEMIBOLD).child("Macros"))
                 .child(div().text_sm().child(format!("Active set: {active_name}. Editing: {scope_name}.")))
                 .child(div().text_sm().text_color(cx.theme().muted_foreground).child("Game sets switch automatically when games open or close. Configure another game from Games → Macros."))
@@ -755,14 +789,10 @@ impl AppView {
                     .child(Switch::new("macro-enable").checked(state.library.enabled).disabled(!cfg!(windows) || busy).on_change(cx.listener(|this, on: &bool, _, cx| { this.macro_engine.edit(|l| l.enabled = *on); cx.notify(); })))
                     .child("Enable automatic triggers")
                     .child(Button::new("macro-stop").label("Stop / cancel").on_click(cx.listener(|this, _, _, cx| { this.macro_engine.stop(); cx.notify(); })))
-                    .child(Button::new("macro-add").label("Add macro").disabled(busy || state.library.macros.len() >= 64).on_click(cx.listener(move |this, _, _, cx| {
-                        let library = this.macro_engine.snapshot().library;
-                        let trigger = (0x70..=0x7b).filter(|k| *k != 0x77).map(|key| Trigger::Shortcut { key }).chain([Trigger::Mouse { button: 4 }, Trigger::Mouse { button: 5 }]).chain((0x7c..=0x87).map(|code| Trigger::Key { code, modifiers: 0 })).chain((0x41..=0x5a).map(|code| Trigger::Key { code, modifiers: 0 })).find(|t| !library.macros.iter().any(|m| m.game_id == scope && m.trigger.same_input(t)));
-                        if let Some(trigger) = trigger { let i = library.macros.len(); this.macro_engine.edit(|l| l.macros.push(Macro { mode: MacroMode::NoRepeat, on_press: vec![], on_release: vec![], game_id: scope.clone(), name: format!("Macro {}", i + 1), trigger, repeats: 1, steps: Vec::new() })); this.macro_selected = Some(i); }
-                        cx.notify();
-                    }))))
-                .child(div().text_sm().child(state.message))
-                .child(list).child(editor)
+                )
+                .child(div().text_sm().text_color(cx.theme().muted_foreground).child(state.message))
+                .child(div().flex().flex_row().items_start().flex_wrap().gap_4().w_full()
+                    .child(saved_panel).child(editor_panel))
         ).into_any_element()
     }
 }
