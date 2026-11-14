@@ -910,9 +910,9 @@ impl AppView {
                             },
                             None => Tile {
                                 usb_id: format!("{:04X}:{:04X}", c.info.vendor_id, c.info.product_id),
-                                powerplay: c.info.vendor_id == 0x046d && c.info.product_id == 0xc53a,
+                                powerplay: (c.info.vendor_id == 0x046d && c.info.product_id == 0xc53a) || v.settings.powerplay_receivers.contains(&c.info.key),
                                 key: c.info.key.clone(),
-                                name: if c.info.vendor_id == 0x046d && c.info.product_id == 0xc53a { "POWERPLAY".into() } else { c.info.product_string.clone() },
+                                name: if (c.info.vendor_id == 0x046d && c.info.product_id == 0xc53a) || v.settings.powerplay_receivers.contains(&c.info.key) { "POWERPLAY".into() } else { c.info.product_string.clone() },
                                 brand: c.brands.first().cloned().unwrap_or_default(),
                                 display_brand: c.brands.first().cloned().unwrap_or_default(),
                                 art: None,
@@ -2447,6 +2447,19 @@ impl AppView {
     /// the box (the Tauri app's `deviceArtStyle` normalisation, so every
     /// model's subject comes out a comparable size); `zoom` scales that up
     /// where the art should dominate.
+    fn identify_powerplay(&mut self, key: &str, enabled: bool, cx: &mut Context<Self>) {
+        self.settings.powerplay_receivers.retain(|saved| saved != key);
+        if enabled { self.settings.powerplay_receivers.push(key.into()); }
+        self.settings.save();
+        if let Some(tile) = self.devices.tiles.iter_mut().find(|tile| tile.key == key) {
+            tile.powerplay = enabled || tile.usb_id == "046D:C53A";
+            if !matches!(tile.status, TileStatus::Connected(_)) {
+                tile.name = if tile.powerplay { "POWERPLAY" } else { "USB Receiver" }.into();
+            }
+        }
+        cx.notify();
+    }
+
     fn device_art(&self, tile: &Tile, side: f32, zoom: f32) -> Div {
         let frame = div().relative().flex_none().w(px(side)).h(px(side)).overflow_hidden();
         if tile.powerplay && !matches!(tile.status, TileStatus::Connected(_)) {
@@ -3386,15 +3399,22 @@ impl AppView {
                 }
                 col.into_any_element()
             }
-            TileStatus::Failed(_) if tile.powerplay => div()
-                .text_sm().text_color(muted)
-                .child("POWERPLAY charging pad and receiver detected. No supported mouse is responding through this interface. Charging status and pad settings are not available in OpenMouse.")
-                .into_any_element(),
-            TileStatus::Failed(error) => div()
-                .text_sm()
-                .text_color(cx.theme().danger)
-                .child(format!("Could not read this device: {error}"))
-                .into_any_element(),
+            TileStatus::Failed(_) if tile.powerplay => div().flex().flex_col().gap_3()
+                .child(div().text_sm().text_color(muted)
+                    .child("POWERPLAY charging pad and receiver detected. No supported mouse is responding through this interface. Charging status and pad settings are not available in OpenMouse."))
+                .when(tile.usb_id != "046D:C53A", |col| {
+                    let key = tile.key.clone();
+                    col.child(Button::new("reset-receiver-label").compact().label("Reset receiver label")
+                        .on_click(cx.listener(move |this, _, _, cx| this.identify_powerplay(&key, false, cx))))
+                }).into_any_element(),
+            TileStatus::Failed(error) => div().flex().flex_col().gap_3()
+                .child(div().text_sm().text_color(cx.theme().danger).child(format!("Could not read this device: {error}")))
+                .when(tile.usb_id == "046D:C539", |col| {
+                    let key = tile.key.clone();
+                    col.child(div().text_sm().text_color(muted).child("If you confirmed this receiver belongs to your POWERPLAY pad, save its identity below."))
+                        .child(Button::new("identify-powerplay").compact().label("Identify as POWERPLAY")
+                            .on_click(cx.listener(move |this, _, _, cx| this.identify_powerplay(&key, true, cx))))
+                }).into_any_element(),
             _ => div().text_sm().text_color(muted).child("Connecting…").into_any_element(),
         };
 
