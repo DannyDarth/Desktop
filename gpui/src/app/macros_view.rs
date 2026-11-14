@@ -1,0 +1,798 @@
+use super::*;
+use crate::macros::{Macro, MacroMode, Section, Trigger};
+use gpui_kit::component::input::{Input, InputEvent, InputState};
+
+enum TextEditTarget {
+    Name {
+        original: String,
+    },
+    Delay {
+        section: Section,
+        step: usize,
+        original: std::sync::Arc<[crate::macros::Step]>,
+    },
+}
+pub(super) struct MacroTextEdit {
+    macro_index: usize,
+    target: TextEditTarget,
+    input: Entity<InputState>,
+    error: Option<String>,
+    _subscription: Subscription,
+}
+#[derive(Clone)]
+struct MacroStepDrag {
+    owner: EntityId,
+    macro_index: usize,
+    from: usize,
+    section: Section,
+    steps: std::sync::Arc<[crate::macros::Step]>,
+    label: String,
+}
+impl Render for MacroStepDrag {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px_3()
+            .py_2()
+            .bg(cx.theme().sidebar)
+            .text_color(cx.theme().foreground)
+            .border_1()
+            .border_color(cx.theme().primary)
+            .rounded(cx.theme().radius)
+            .child(self.label.clone())
+    }
+}
+
+impl AppView {
+    fn begin_macro_text_edit(
+        &mut self,
+        index: usize,
+        target: TextEditTarget,
+        value: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let state = self.macro_engine.snapshot();
+        if state.playing || state.recording.is_some() || state.assigning.is_some() {
+            return;
+        }
+        let input = cx.new(|cx| InputState::new(window, cx).default_value(value));
+        let subscription = cx.subscribe(&input, |this, _, event: &InputEvent, cx| match event {
+            InputEvent::PressEnter { .. } | InputEvent::Blur => this.commit_macro_text_edit(cx),
+            InputEvent::Change => {
+                if let Some(edit) = this.macro_text_edit.as_mut() {
+                    edit.error = None;
+                }
+                cx.notify();
+            }
+            _ => {}
+        });
+        self.macro_text_edit = Some(MacroTextEdit {
+            macro_index: index,
+            target,
+            input: input.clone(),
+            error: None,
+            _subscription: subscription,
+        });
+        input.update(cx, |input, cx| {
+            input.focus(window, cx);
+            input.select_all(window, cx);
+        });
+        cx.notify();
+    }
+    fn commit_macro_text_edit(&mut self, cx: &mut Context<Self>) {
+        let Some(mut edit) = self.macro_text_edit.take() else {
+            return;
+        };
+        let text = edit.input.read(cx).value().to_string();
+        let state = self.macro_engine.snapshot();
+        let result = (|| -> Result<(), String> {
+            if state.playing || state.recording.is_some() || state.assigning.is_some() {
+                return Err("Stop playback or recording before editing.".into());
+            }
+            let m = state
+                .library
+                .macros
+                .get(edit.macro_index)
+                .ok_or("Macro no longer exists.")?;
+            match &edit.target {
+                TextEditTarget::Name { original } => {
+                    if m.name != *original {
+                        return Err("The name changed. Cancel and try again.".into());
+                    }
+                    let name = crate::macros::parse_macro_name(&text)?;
+                    self.macro_engine
+                        .edit(|l| l.macros[edit.macro_index].name = name);
+                }
+                TextEditTarget::Delay {
+                    section,
+                    step,
+                    original,
+                } => {
+                    if m.section(*section) != original.as_ref() {
+                        return Err("The steps changed. Cancel and try again.".into());
+                    }
+                    let value = crate::macros::parse_delay_ms(&text)?;
+                    self.macro_engine.edit(|l| {
+                        l.macros[edit.macro_index].section_mut(*section)[*step].delay_ms = value
+                    });
+                }
+            }
+            Ok(())
+        })();
+        if let Err(error) = result {
+            edit.error = Some(error);
+            self.macro_text_edit = Some(edit);
+        }
+        cx.notify();
+    }
+    fn render_macro_text_edit(
+        &self,
+        label: &'static str,
+        width: f32,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some(edit) = &self.macro_text_edit else {
+            return div().into_any_element();
+        };
+        div()
+            .id("macro-text-edit")
+            .flex()
+            .flex_col()
+            .gap_1()
+            .w(px(width))
+            .capture_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                if event.keystroke.key == "escape" {
+                    this.macro_text_edit = None;
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+            }))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(Input::new(&edit.input).small().aria_label(label))
+            .children(
+                edit.error
+                    .clone()
+                    .map(|error| div().text_xs().text_color(cx.theme().danger).child(error)),
+            )
+            .into_any_element()
+    }
+    fn macro_drop_zone(
+        &self,
+        macro_index: usize,
+        gap: usize,
+        section: Section,
+        len: usize,
+        busy: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let owner = cx.entity_id();
+        div()
+            .id(SharedString::from(format!("macro-gap-{macro_index}-{gap}")))
+            .w_full()
+            .h(px(10.))
+            .can_drop(move |any, _, _| {
+                !busy
+                    && any.downcast_ref::<MacroStepDrag>().is_some_and(|drag| {
+                        drag.owner == owner
+                            && drag.macro_index == macro_index
+                            && drag.section == section
+                            && crate::macros::drop_target(drag.from, gap, len).is_some()
+                    })
+            })
+            .drag_over::<MacroStepDrag>(move |style, drag, _, cx| {
+                if !busy
+                    && drag.owner == owner
+                    && drag.macro_index == macro_index
+                    && drag.section == section
+                    && crate::macros::drop_target(drag.from, gap, len).is_some()
+                {
+                    style.bg(cx.theme().primary)
+                } else {
+                    style
+                }
+            })
+            .on_drop(cx.listener(move |this, drag: &MacroStepDrag, _, cx| {
+                if busy
+                    || drag.owner != cx.entity_id()
+                    || drag.macro_index != macro_index
+                    || drag.section != section
+                {
+                    return;
+                }
+                let state = this.macro_engine.snapshot();
+                if state.playing || state.recording.is_some() || state.assigning.is_some() {
+                    return;
+                }
+                let Some(m) = state.library.macros.get(macro_index) else {
+                    return;
+                };
+                if m.section(section) != drag.steps.as_ref() {
+                    return;
+                }
+                if let Some(to) =
+                    crate::macros::drop_target(drag.from, gap, m.section(section).len())
+                {
+                    this.macro_engine
+                        .move_section_step(macro_index, section, drag.from, to);
+                    cx.notify();
+                }
+            }))
+            .into_any_element()
+    }
+    pub(super) fn render_macros(&self, cx: &mut Context<Self>) -> AnyElement {
+        let state = self.macro_engine.snapshot();
+        let scope = self.macro_scope.clone();
+        let scope_name = scope
+            .as_deref()
+            .map(|id| crate::games::notification_title(&self.game_name(id)))
+            .unwrap_or_else(|| "Default".into());
+        let active_name = state
+            .active_game
+            .as_deref()
+            .map(|id| crate::games::notification_title(&self.game_name(id)))
+            .unwrap_or_else(|| "Default".into());
+        let busy = state.playing || state.recording.is_some() || state.assigning.is_some();
+        let selected = self.macro_selected.filter(|i| {
+            state
+                .library
+                .macros
+                .get(*i)
+                .is_some_and(|m| m.game_id == scope)
+        }).or_else(|| state.library.macros.iter().position(|m| m.game_id == scope));
+        let macro_count = state.library.macros.iter().filter(|m| m.game_id == scope).count();
+        let mut scopes = h_flex().gap_2().flex_wrap().child(self.chip(
+            "macro-default".into(),
+            "Default".into(),
+            scope.is_none(),
+            cx,
+            |this, cx| {
+                this.macro_scope = None;
+                this.macro_selected = None;
+                cx.notify();
+            },
+        ));
+        for game in self.games.iter().filter(|g| {
+            g.installed
+                || g.executable_path.is_some()
+                || g.running
+                || scope.as_deref() == Some(&g.id)
+                || state
+                    .library
+                    .macros
+                    .iter()
+                    .any(|m| m.game_id.as_deref() == Some(&g.id))
+        }) {
+            let id = game.id.clone();
+            let mut chip = self
+                .chip(
+                    format!("macro-game-{id}"),
+                    crate::games::notification_title(&game.name),
+                    scope.as_deref() == Some(&id),
+                    cx,
+                    move |this, cx| {
+                        this.macro_scope = Some(id.clone());
+                        this.macro_selected = None;
+                        cx.notify();
+                    },
+                )
+                .flex()
+                .items_center()
+                .gap_2();
+            if game.executable_path.is_some() {
+                if let Some(path) = games::cached_art_path(game) {
+                    chip = chip.child(img(path).size(px(20.)).object_fit(ObjectFit::Contain));
+                }
+            }
+            scopes = scopes.child(chip);
+        }
+        let mut activation = div().flex().flex_col().gap_2();
+        if let Some(game_id) = scope.clone() {
+            let focus_only = state.library.focus_only.contains(&game_id);
+            let mut options = h_flex()
+                .gap_2()
+                .items_center()
+                .flex_wrap()
+                .child(div().text_sm().child("Activate game macros:"));
+            for (focused, label) in [(false, "While running"), (true, "While focused")] {
+                let id = game_id.clone();
+                options = options.child(self.chip(
+                    format!("macro-focus-{focused}"),
+                    label.into(),
+                    focus_only == focused,
+                    cx,
+                    move |this, cx| {
+                        if busy || !cfg!(windows) {
+                            return;
+                        }
+                        this.macro_engine.edit(|l| {
+                            if focused {
+                                l.focus_only.insert(id.clone());
+                            } else {
+                                l.focus_only.remove(&id);
+                            }
+                        });
+                        cx.notify();
+                    },
+                ));
+            }
+            activation = activation.child(self.render_game_art_actions(&game_id, cx)).child(options).child(div().text_xs().text_color(cx.theme().muted_foreground)
+                .child(if focus_only { "Alt+Tab or the Windows key switches away from this macro set and stops its playback. Returning to the game reactivates the set." } else { "Keeps this game's macro set active while it runs, including after Alt+Tab." }));
+        }
+        let mut list = div().flex().flex_col().gap_2();
+        for (i, m) in state
+            .library
+            .macros
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| m.game_id == scope)
+        {
+            let count = if state.recording == Some(i) {
+                state.recorded_steps.len()
+            } else { m.event_count() };
+            list = list.child(self.chip(
+                format!("macro-{i}"),
+                String::new(),
+                selected == Some(i),
+                cx,
+                move |this, cx| {
+                    this.macro_text_edit = None;
+                    this.macro_engine.select_section(Section::Repeat);
+                    this.macro_selected = Some(i);
+                    cx.notify();
+                },
+            ).w_full().min_w_0().py_3().flex().flex_col().gap_1()
+                .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(m.name.clone()))
+                .child(div().text_xs().text_color(cx.theme().muted_foreground)
+                    .child(format!("{} · {count} steps", m.trigger.label())))
+                .when(state.recording == Some(i), |card| card.child(
+                    div().text_xs().text_color(cx.theme().danger).child("Recording…"))));
+        }
+        if !state.library.macros.iter().any(|m| m.game_id == scope) {
+            list = list.child(div().text_sm().child("No macros in this set. Add a macro, then record its keyboard presses and mouse clicks."));
+        }
+        let mut editor = div().flex().flex_col().gap_3().min_w_0();
+        if let Some(i) = selected {
+            let m = &state.library.macros[i];
+            let section = if m.mode == MacroMode::Sequence {
+                state.section
+            } else {
+                Section::Repeat
+            };
+            let steps = m.section(section);
+            let playback_error = state.library.playback_error(i);
+            let editing_name = self.macro_text_edit.as_ref().is_some_and(|e| {
+                e.macro_index == i && matches!(e.target, TextEditTarget::Name { .. })
+            });
+            let heading = if editing_name {
+                self.render_macro_text_edit("Macro name", 300., cx)
+            } else {
+                h_flex()
+                    .gap_3()
+                    .items_center()
+                    .child(
+                        div()
+                            .text_base()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(m.name.clone()),
+                    )
+                    .child(
+                        Button::new("macro-rename")
+                            .ghost()
+                            .compact()
+                            .label("Rename")
+                            .disabled(busy)
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                let state = this.macro_engine.snapshot();
+                                if let Some(m) = state.library.macros.get(i) {
+                                    this.begin_macro_text_edit(
+                                        i,
+                                        TextEditTarget::Name {
+                                            original: m.name.clone(),
+                                        },
+                                        m.name.clone(),
+                                        window,
+                                        cx,
+                                    );
+                                }
+                            })),
+                    )
+                    .into_any_element()
+            };
+            editor = editor
+                .child(heading)
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .flex_wrap()
+                        .child(
+                            Button::new("macro-record")
+                                .label(if state.recording == Some(i) {
+                                    "F8 saves recording"
+                                } else {
+                                    "Record input"
+                                })
+                                .disabled(!cfg!(windows) || busy)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.macro_engine.record(i);
+                                    cx.notify();
+                                })),
+                        )
+                        .child(
+                            Button::new("macro-play")
+                                .label("Play once")
+                                .disabled(
+                                    !cfg!(windows)
+                                        || busy
+                                        || m.event_count() == 0
+                                        || playback_error.is_some()
+                                        || scope != state.active_game,
+                                )
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.macro_engine.play(i);
+                                    cx.notify();
+                                })),
+                        )
+                        .child(
+                            Button::new("macro-delete")
+                                .label("Delete macro")
+                                .disabled(busy)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.macro_engine.edit(|l| {
+                                        l.macros.remove(i);
+                                    });
+                                    this.macro_selected = None;
+                                    cx.notify();
+                                })),
+                        ),
+                )
+                .child(div().text_sm().child("Activation input"));
+            let trigger_row = h_flex()
+                .gap_3()
+                .items_center()
+                .flex_wrap()
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(FontWeight::MEDIUM)
+                        .child(m.trigger.label()),
+                )
+                .child(
+                    Button::new("macro-assign-trigger")
+                        .compact()
+                        .label(if state.assigning == Some(i) {
+                            "Waiting for input…"
+                        } else {
+                            "Assign input"
+                        })
+                        .disabled(!cfg!(windows) || busy)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.macro_engine.assign_trigger(i);
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("Press a key, shortcut or mouse button. Escape cancels."),
+                );
+            editor = editor.child(trigger_row);
+            let mut modes = h_flex().gap_2().flex_wrap();
+            for mode in [
+                MacroMode::NoRepeat,
+                MacroMode::WhileHeld,
+                MacroMode::Toggle,
+                MacroMode::Sequence,
+            ] {
+                modes = modes.child(self.chip(
+                    format!("macro-mode-{mode:?}"),
+                    mode.label().into(),
+                    m.mode == mode,
+                    cx,
+                    move |this, cx| {
+                        if busy {
+                            return;
+                        }
+                        this.macro_engine.edit(|l| l.macros[i].mode = mode);
+                        this.macro_engine.select_section(Section::Repeat);
+                        cx.notify();
+                    },
+                ));
+            }
+            editor = editor.child(modes);
+            let help = match m.mode {
+                MacroMode::NoRepeat => "Plays once when you press the activation input.",
+                MacroMode::WhileHeld => "Repeats while the activation input is held. Releasing it stops playback.",
+                MacroMode::Toggle => "Press the activation input to start repeating. Press it again to stop.",
+                MacroMode::Sequence => "On press plays once, While held repeats, and On release plays once when you let go.",
+                MacroMode::Count => "This existing macro uses its saved repeat count. Choose a type above to change it.",
+            };
+            editor = editor.child(
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(help),
+            );
+            if m.mode == MacroMode::Count {
+                editor = editor.child(
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(
+                            Button::new("macro-repeat-less")
+                                .label("−")
+                                .disabled(busy || m.repeats <= 1)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.macro_engine.edit(|l| {
+                                        l.macros[i].repeats =
+                                            l.macros[i].repeats.saturating_sub(1).max(1)
+                                    });
+                                    cx.notify();
+                                })),
+                        )
+                        .child(format!("Repeat {} times", m.repeats))
+                        .child(
+                            Button::new("macro-repeat-more")
+                                .label("+")
+                                .disabled(busy || m.repeats >= 100)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.macro_engine.edit(|l| {
+                                        l.macros[i].repeats = (l.macros[i].repeats + 1).min(100)
+                                    });
+                                    cx.notify();
+                                })),
+                        ),
+                );
+            }
+            if m.mode == MacroMode::Sequence {
+                let mut sections = h_flex().gap_2().flex_wrap();
+                for phase in [Section::Press, Section::Repeat, Section::Release] {
+                    sections = sections.child(self.chip(
+                        format!("macro-section-{phase:?}"),
+                        format!("{} · {} events", phase.label(), m.section(phase).len()),
+                        section == phase,
+                        cx,
+                        move |this, cx| {
+                            if !busy {
+                                this.macro_engine.select_section(phase);
+                                cx.notify();
+                            }
+                        },
+                    ));
+                }
+                editor = editor.child(sections).child(
+                    div()
+                        .text_sm()
+                        .child(format!("Recording and editing: {}", section.label())),
+                );
+            }
+            if let Some(error) = playback_error {
+                editor = editor.child(div().text_sm().text_color(cx.theme().danger).child(
+                    format!("Order saved. Playback is paused until the order is complete: {error}"),
+                ));
+            }
+            if state.recording == Some(i) {
+                let mut live = div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .p_3()
+                    .border_1()
+                    .border_color(cx.theme().primary)
+                    .rounded(cx.theme().radius)
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(format!(
+                                "Live input · {} events recorded",
+                                state.recorded_steps.len()
+                            )),
+                    );
+                if state.recorded_steps.is_empty() {
+                    live = live.child(div().text_sm().text_color(cx.theme().muted_foreground)
+                        .child("After the countdown, press a key or click a mouse button. F8 saves; Escape cancels."));
+                } else {
+                    live = live.child(div().text_xs().text_color(cx.theme().muted_foreground)
+                        .child("Latest events first (up to 12 shown). All captured events are saved with F8."));
+                    for (j, step) in state.recorded_steps.iter().enumerate().rev().take(12) {
+                        live = live.child(
+                            h_flex()
+                                .gap_3()
+                                .items_center()
+                                .flex_wrap()
+                                .child(div().min_w(px(220.)).text_sm().child(format!(
+                                    "{}. {}",
+                                    j + 1,
+                                    crate::macros::step_label(step)
+                                )))
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(format!("{} ms", step.delay_ms)),
+                                ),
+                        );
+                    }
+                }
+                editor = editor.child(live);
+            } else {
+                editor = editor.child(h_flex().justify_between().items_center().gap_2()
+                    .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(format!("Steps · {}", steps.len())))
+                    .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Delay before input")));
+                if steps.is_empty() {
+                    editor = editor.child(div().p_4().border_1().border_color(cx.theme().border)
+                        .rounded(cx.theme().radius).text_sm().text_color(cx.theme().muted_foreground)
+                        .child("No steps yet. Choose Record input, perform your actions, then press F8 to save."));
+                }
+                editor = editor.child(div().text_xs().text_color(cx.theme().muted_foreground)
+                    .child("Drag a row to reorder it. Drop on the green line. Delays move with their events."));
+                let dragged_steps: std::sync::Arc<[crate::macros::Step]> = steps.to_vec().into();
+                let mut rows = div().flex().flex_col();
+                for (j, step) in steps.iter().enumerate() {
+                    rows = rows.child(self.macro_drop_zone(i, j, section, steps.len(), busy, cx));
+                    let editing_delay = self.macro_text_edit.as_ref().is_some_and(|e| e.macro_index == i && matches!(e.target, TextEditTarget::Delay { section: phase, step, .. } if phase == section && step == j));
+                    let delay_control = if editing_delay {
+                        self.render_macro_text_edit("Delay in milliseconds", 160., cx)
+                    } else {
+                        Button::new(SharedString::from(format!("macro-delay-value-{j}")))
+                            .ghost()
+                            .compact()
+                            .label(format!("{} ms", step.delay_ms))
+                            .tooltip("Click to type a delay")
+                            .disabled(busy)
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                let state = this.macro_engine.snapshot();
+                                if let Some(m) = state.library.macros.get(i) {
+                                    let original: std::sync::Arc<[crate::macros::Step]> =
+                                        m.section(section).to_vec().into();
+                                    if let Some(step) = original.get(j) {
+                                        let value = step.delay_ms.to_string();
+                                        this.begin_macro_text_edit(
+                                            i,
+                                            TextEditTarget::Delay {
+                                                section,
+                                                step: j,
+                                                original,
+                                            },
+                                            value,
+                                            window,
+                                            cx,
+                                        );
+                                    }
+                                }
+                            }))
+                            .into_any_element()
+                    };
+                    let payload = MacroStepDrag {
+                        owner: cx.entity_id(),
+                        macro_index: i,
+                        from: j,
+                        section,
+                        steps: dragged_steps.clone(),
+                        label: crate::macros::step_label(step),
+                    };
+                    rows = rows.child(
+                        h_flex()
+                            .id(SharedString::from(format!("macro-event-{j}")))
+                            .gap_3()
+                            .items_center()
+                            .px_3()
+                            .py_2()
+                            .w_full()
+                            .border_1()
+                            .border_color(cx.theme().border)
+                            .rounded(cx.theme().radius)
+                            .when(!busy && !editing_delay, |row| {
+                                row.cursor_grab().on_drag(payload, |drag, _, _, cx| {
+                                    cx.stop_propagation();
+                                    cx.new(|_| drag.clone())
+                                })
+                            })
+                            .child(div().text_color(cx.theme().muted_foreground).child("⠿"))
+                            .child(
+                                div()
+                                    .w(px(28.))
+                                    .text_sm()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(format!("{}", j + 1)),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_sm()
+                                    .child(crate::macros::step_label(step)),
+                            )
+                            .child(
+                                Button::new(SharedString::from(format!("macro-delay-less-{j}")))
+                                    .compact()
+                                    .label("−")
+                                    .tooltip("Reduce delay by 10 ms")
+                                    .disabled(busy || step.delay_ms == 0)
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        cx.stop_propagation();
+                                        this.macro_engine.edit(|l| {
+                                            l.macros[i].section_mut(section)[j].delay_ms =
+                                                l.macros[i].section_mut(section)[j]
+                                                    .delay_ms
+                                                    .saturating_sub(10)
+                                        });
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(delay_control)
+                            .child(
+                                Button::new(SharedString::from(format!("macro-delay-more-{j}")))
+                                    .compact()
+                                    .label("+")
+                                    .tooltip("Increase delay by 10 ms")
+                                    .disabled(busy || step.delay_ms >= 60_000)
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        cx.stop_propagation();
+                                        this.macro_engine.edit(|l| {
+                                            l.macros[i].section_mut(section)[j].delay_ms =
+                                                (l.macros[i].section_mut(section)[j].delay_ms + 10)
+                                                    .min(60_000)
+                                        });
+                                        cx.notify();
+                                    })),
+                            ),
+                    );
+                }
+                rows = rows.child(self.macro_drop_zone(
+                    i,
+                    steps.len(),
+                    section,
+                    steps.len(),
+                    busy,
+                    cx,
+                ));
+                editor = editor.child(rows);
+            }
+        } else {
+            editor = editor.child(div().flex().flex_col().gap_2().py_6()
+                .child(div().text_base().font_weight(FontWeight::SEMIBOLD).child("Create your first macro"))
+                .child(div().text_sm().text_color(cx.theme().muted_foreground)
+                    .child("Choose Add macro, assign an input, then record the steps. Your changes save automatically.")));
+        }
+        let add_macro = Button::new("macro-add").label("Add macro").disabled(busy || state.library.macros.len() >= 64).on_click(cx.listener(move |this, _, _, cx| {
+                        let library = this.macro_engine.snapshot().library;
+                        let trigger = (0x70..=0x7b).filter(|k| *k != 0x77).map(|key| Trigger::Shortcut { key }).chain([Trigger::Mouse { button: 4 }, Trigger::Mouse { button: 5 }]).chain((0x7c..=0x87).map(|code| Trigger::Key { code, modifiers: 0 })).chain((0x41..=0x5a).map(|code| Trigger::Key { code, modifiers: 0 })).find(|t| !library.macros.iter().any(|m| m.game_id == scope && m.trigger.same_input(t)));
+                        if let Some(trigger) = trigger { let i = library.macros.len(); this.macro_engine.edit(|l| l.macros.push(Macro { mode: MacroMode::NoRepeat, on_press: vec![], on_release: vec![], game_id: scope.clone(), name: format!("Macro {}", i + 1), trigger, repeats: 1, steps: Vec::new() })); this.macro_selected = Some(i); }
+                        cx.notify();
+                    }));
+        let saved_panel = div().flex().flex_col().gap_3().w(px(260.)).flex_shrink_0()
+            .p_4().border_1().border_color(cx.theme().border).rounded(cx.theme().radius)
+            .bg(cx.theme().sidebar)
+            .child(h_flex().justify_between().items_center()
+                .child(div().text_base().font_weight(FontWeight::SEMIBOLD).child("Saved macros"))
+                .child(div().text_xs().text_color(cx.theme().muted_foreground).child(macro_count.to_string())))
+            .child(add_macro).child(list);
+        let editor_panel = div().flex_1().min_w(px(460.)).p_4()
+            .border_1().border_color(cx.theme().border).rounded(cx.theme().radius)
+            .child(div().flex().flex_col().gap_4()
+                .child(h_flex().justify_between().items_center().flex_wrap().gap_2()
+                    .child(div().text_base().font_weight(FontWeight::SEMIBOLD).child("Step editor"))
+                    .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Changes save automatically")))
+                .child(editor));
+        div().id("macros-page").size_full().overflow_y_scroll().p(px(PAGE_PAD)).child(
+            div().flex().flex_col().gap_4().w_full().max_w(px(1280.))
+                .child(div().text_xl().font_weight(FontWeight::SEMIBOLD).child("Macros"))
+                .child(div().text_sm().child(format!("Active set: {active_name}. Editing: {scope_name}.")))
+                .child(div().text_sm().text_color(cx.theme().muted_foreground).child("Game sets switch automatically when games open or close. Configure another game from Games → Macros."))
+                .child(div().text_sm().text_color(cx.theme().muted_foreground).child("F8 saves a recording. Escape stops or cancels. Triggers keep their normal input action. Dedicated G-keys, extra vendor buttons and cursor/wheel movement need separate support."))
+                .child(scopes)
+                .child(Button::new("macro-add-game").compact().label("Add game").disabled(busy).on_click(cx.listener(|this, _, _, cx| this.add_custom_game(cx))))
+                .child(activation)
+                .child(h_flex().gap_3().items_center().flex_wrap()
+                    .child(Switch::new("macro-enable").checked(state.library.enabled).disabled(!cfg!(windows) || busy).on_change(cx.listener(|this, on: &bool, _, cx| { this.macro_engine.edit(|l| l.enabled = *on); cx.notify(); })))
+                    .child("Enable automatic triggers")
+                    .child(Button::new("macro-stop").label("Stop / cancel").on_click(cx.listener(|this, _, _, cx| { this.macro_engine.stop(); cx.notify(); })))
+                )
+                .child(div().text_sm().text_color(cx.theme().muted_foreground).child(state.message))
+                .child(div().flex().flex_row().items_start().flex_wrap().gap_4().w_full()
+                    .child(saved_panel).child(editor_panel))
+        ).into_any_element()
+    }
+}

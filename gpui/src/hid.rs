@@ -138,7 +138,7 @@ impl DeviceArt {
         }
         let tmp = dir.join(format!("{}.part", self.filename));
         let ok = crate::proc::quiet(
-            std::process::Command::new("curl")
+            crate::proc::curl()
                 .args(["-sSfL", "-m", "20", "-o"])
                 .arg(&tmp)
                 .arg(&self.url)
@@ -291,6 +291,8 @@ pub struct Tabs {
     pub buttons: Vec<Section>,
     #[serde(default)]
     pub advanced: Vec<Section>,
+    #[serde(rename = "keyboardLighting", default)]
+    pub keyboard_lighting: Vec<Section>,
     #[serde(default)]
     pub lighting: Option<LightingSpec>,
 }
@@ -308,6 +310,31 @@ pub struct ConnectedDevice {
     pub driver: String,
     /// The protocol library's `MouseStatus`, as it came out of the driver.
     pub status: Value,
+}
+
+/// Cache only process names, never command lines or input data.
+fn ghub_lighting_conflict() -> bool {
+    #[cfg(windows)]
+    {
+        use std::sync::{Mutex, OnceLock};
+        use std::time::{Duration, Instant};
+        static CACHE: OnceLock<Mutex<Option<(Instant, bool)>>> = OnceLock::new();
+        let Ok(mut cache) = CACHE.get_or_init(|| Mutex::new(None)).lock() else { return true; };
+        if let Some((at, result)) = *cache {
+            if at.elapsed() < Duration::from_millis(500) { return result; }
+        }
+        let mut system = sysinfo::System::new();
+        system.refresh_processes_specifics(sysinfo::ProcessesToUpdate::All, true,
+            sysinfo::ProcessRefreshKind::nothing().without_tasks());
+        let found = system.processes().values().any(|process| {
+            matches!(process.name().to_string_lossy().to_ascii_lowercase().as_str(),
+                "lghub.exe" | "lghub_agent.exe")
+        });
+        *cache = Some((Instant::now(), found));
+        found
+    }
+    #[cfg(not(windows))]
+    { false }
 }
 
 enum Msg {
@@ -352,6 +379,15 @@ impl HidService {
         self.call("listCandidates", None, |json| {
             serde_json::from_str(&json).map_err(|e| e.to_string())
         })
+    }
+
+    /// Animation errors only; does not open or poll any HID device.
+    pub fn keyboard_cycle_errors(&self) -> oneshot::Receiver<Result<Vec<(String, String)>, String>> {
+        self.call("keyboardCycleErrors", None, |json| serde_json::from_str(&json).map_err(|e| e.to_string()))
+    }
+
+    pub fn restore_keyboard_lighting(&self) {
+        drop(self.call("restoreKeyboardLighting",None,|_|Ok(())));
     }
 
     /// Preferences the JS layer needs when it lays controls out. Sent before a
@@ -639,6 +675,12 @@ fn dispatch(
     let json = |v: &dyn erased::Ser| v.to_json();
 
     match command {
+        "keyboard_lighting_conflict"=>json(&ghub_lighting_conflict()),
+        "keyboard_lighting_load"=>json(&crate::lighting_preferences::load()?),
+        "keyboard_lighting_save"=> {
+            let entries:Vec<crate::lighting_preferences::Preference>=serde_json::from_value(args.get("entries").cloned().ok_or("Missing lighting preferences.")?).map_err(|e|e.to_string())?;
+            crate::lighting_preferences::save(&entries)?;Ok(String::new())
+        },
         "hid_list_interfaces" => {
             let vendor_ids: Vec<u16> = args
                 .get("vendorIds")

@@ -5,6 +5,35 @@ use gpui_kit::component::TitleBar;
 use gpui_kit::*;
 use openmouse_gpui::app::AppView;
 
+fn install_crash_log() {
+    let Some(dir) = dirs::config_dir().map(|p| p.join("openmouse")) else {
+        return;
+    };
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("crash.log");
+    if std::fs::metadata(&path).is_ok_and(|m| m.len() > 1024 * 1024) {
+        let _ = std::fs::rename(&path, dir.join("crash.previous.log"));
+    }
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        use std::io::Write;
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
+            let _ = writeln!(
+                file,
+                "OpenMouse {} panic at {:?}: {info}\n{}",
+                env!("CARGO_PKG_VERSION"),
+                std::time::SystemTime::now(),
+                std::backtrace::Backtrace::force_capture()
+            );
+        }
+        previous(info);
+    }));
+}
+
 fn main() {
     // Headless mode for the installer: list the plugged-in supported devices
     // and exit before any window or background work starts.
@@ -12,17 +41,36 @@ fn main() {
         openmouse_gpui::supported_devices::write(&path);
         return;
     }
-    application().with_assets(assets::AllAssets).run(|cx| {
+    #[cfg(windows)]
+    let _instance = match openmouse_gpui::single_instance::Instance::acquire() {
+        Ok(openmouse_gpui::single_instance::Launch::Primary(instance)) => instance,
+        Ok(openmouse_gpui::single_instance::Launch::Secondary) => return,
+        Err(error) => {
+            openmouse_gpui::single_instance::show_startup_error(&error);
+            return;
+        }
+    };
+    #[cfg(windows)]
+    let activation_event = _instance.activation_event();
+    install_crash_log();
+    application().with_assets(assets::AllAssets).run(move |cx| {
         init(cx);
 
         // Tauri parity: `decorations: false` — hide the native macOS bar so
         // Kit's custom `TitleBar` owns the top strip (drag, double-click
         // zoom, traffic lights), instead of rendering underneath it.
         // Three quarters of the screen in each direction, centered on it.
-        let screen = cx.primary_display().map(|display| display.bounds().size).unwrap_or(size(px(1467.), px(960.)));
+        let screen = cx
+            .primary_display()
+            .map(|display| display.bounds().size)
+            .unwrap_or(size(px(1467.), px(960.)));
         let window_size = size(screen.width * 0.75, screen.height * 0.75);
         let options = WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, window_size, cx))),
+            window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
+                None,
+                window_size,
+                cx,
+            ))),
             window_min_size: Some(size(px(720.), px(500.))),
             // Native compositor backdrop; scene tint supplies surface alpha.
             window_background: WindowBackgroundAppearance::Transparent,
@@ -45,15 +93,60 @@ fn main() {
             cx.new(|cx| AppView::build(stored.theme, wallpaper, window, cx))
         })
         .expect("failed to open main window");
+        #[cfg(windows)]
+        {
+            use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+            let hwnd = handle
+                .update(cx, |_, window, _| {
+                    match HasWindowHandle::window_handle(&*window).map(|h| h.as_raw()) {
+                        Ok(RawWindowHandle::Win32(h)) => Some(h.hwnd.get()),
+                        _ => None,
+                    }
+                })
+                .ok()
+                .flatten();
+            if let Some(hwnd) = hwnd {
+                openmouse_gpui::single_instance::register_main_window(hwnd);
+            }
+            cx.spawn(async move |cx| {
+                loop {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(200))
+                        .await;
+                    // Resolve the live window inside a short UI update, then
+                    // foreground it outside the UI borrow (notification-crash fix).
+                    if openmouse_gpui::single_instance::take_activation(activation_event) {
+                        let hwnd = handle
+                            .update(cx, |_, window, _| {
+                                match HasWindowHandle::window_handle(&*window).map(|h| h.as_raw()) {
+                                    Ok(RawWindowHandle::Win32(h)) => Some(h.hwnd.get()),
+                                    _ => None,
+                                }
+                            })
+                            .ok()
+                            .flatten();
+                        let Some(hwnd) = hwnd else { break };
+                        openmouse_gpui::single_instance::show_existing_window(hwnd);
+                        openmouse_gpui::activity::ACTIVITY.set_active(true);
+                    }
+                }
+            })
+            .detach();
+        }
         // Development aid: `OPENMOUSE_START_PAGE=updates|games|settings|supported`
         // opens straight on that page (handy for profiling and screenshots).
-        if let Some(page) = std::env::var("OPENMOUSE_START_PAGE").ok().and_then(|name| match name.as_str() {
-            "updates" | "whatsnew" => Some(openmouse_gpui::app::Page::Updates),
-            "games" => Some(openmouse_gpui::app::Page::Games),
-            "settings" => Some(openmouse_gpui::app::Page::Settings),
-            "supported" => Some(openmouse_gpui::app::Page::Supported),
-            _ => None,
-        }) {
+        if let Some(page) =
+            std::env::var("OPENMOUSE_START_PAGE")
+                .ok()
+                .and_then(|name| match name.as_str() {
+                    "updates" | "whatsnew" => Some(openmouse_gpui::app::Page::Updates),
+                    "macros" => Some(openmouse_gpui::app::Page::Macros),
+                    "games" => Some(openmouse_gpui::app::Page::Games),
+                    "settings" => Some(openmouse_gpui::app::Page::Settings),
+                    "supported" => Some(openmouse_gpui::app::Page::Supported),
+                    _ => None,
+                })
+        {
             view.update(cx, |view, cx| view.set_page(page, cx));
         }
         // Closing the window hides it to the tray icon (where there is one).
@@ -103,18 +196,28 @@ fn main() {
         // change (mirrors `startDynamicAccentWatcher`). Focus-triggered
         // checks ride on the same path via GPUI's window focus events.
         openmouse_gpui::theme::spawn_wallpaper_watcher(cx, &view, &handle);
-        // Startup + 6-hour background check for a newer release (check +
-        // notify only — no download/install yet).
-        openmouse_gpui::update_check::spawn_update_watcher(cx, &view);
         // Game art prefetch: download missing covers on the background
         // executor (curl, 20s/file cap), then notify so cards repaint from
         // letter tiles to art. Non-fatal.
         {
             let view_weak = view.downgrade();
             cx.spawn(async move |cx| {
-                cx.background_executor()
+                let games = cx
+                    .background_executor()
                     .spawn(async {
                         let games = openmouse_gpui::games::load_catalog();
+                        for game in &games {
+                            if let Some(path) = &game.executable_path {
+                                openmouse_gpui::games::cache_executable_icon(path);
+                                let _ = openmouse_gpui::games::auto_cover(&game.id, false);
+                            }
+                        }
+                        games
+                    })
+                    .await;
+                let _ = view_weak.update(cx, |v, cx| v.refresh_game_art(cx));
+                cx.background_executor()
+                    .spawn(async move {
                         openmouse_gpui::games::prefetch_art(&games);
                     })
                     .await;

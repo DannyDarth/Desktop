@@ -153,6 +153,29 @@ fn library_paths(text: &str) -> Vec<PathBuf> {
         .collect()
 }
 
+/// Identify the Steam manifest whose installation contains this executable.
+pub(super) fn steam_app_for_executable(executable: &str) -> Option<u32> {
+    steam_title_for_executable(executable).map(|(id,_)| id)
+}
+pub(super) fn steam_title_for_executable(executable: &str) -> Option<(u32,String)> {
+    let executable = Path::new(executable);
+    let common = executable.ancestors().find(|p| p.file_name().is_some_and(|s| s.eq_ignore_ascii_case("common")) && p.parent().and_then(|p| p.file_name()).is_some_and(|s| s.eq_ignore_ascii_case("steamapps")))?;
+    let apps = common.parent()?;
+    for entry in std::fs::read_dir(apps).ok()?.flatten() {
+        let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+        let Some(id) = name.strip_prefix("appmanifest_").and_then(|s| s.strip_suffix(".acf")).and_then(|s| s.parse::<u32>().ok()) else { continue; };
+        if entry.metadata().ok().is_none_or(|m| m.len() > 1024 * 1024) { continue; }
+        let Ok(text) = std::fs::read_to_string(entry.path()) else { continue; };
+        let Some(doc) = vdf::parse(&text) else { continue; };
+        let Some(state) = doc.map("appstate") else { continue; };
+        if state.text("appid").and_then(|s| s.parse::<u32>().ok()) != Some(id) { continue; }
+        let Some(dir) = state.text("installdir").and_then(safe_relative) else { continue; };
+        let root = common.join(dir);
+        if executable.ancestors().any(|p| crate::macros::paths_match(&p.to_string_lossy(), &root.to_string_lossy())) { return Some((id,state.text("name").unwrap_or_else(|| state.text("installdir").unwrap_or("Game")).to_owned())); }
+    }
+    None
+}
+
 fn scan_steam(roots: &[PathBuf], ids: &mut HashSet<u32>) {
     for library in steam_libraries(roots) {
         let Ok(entries) = std::fs::read_dir(library.join("steamapps")) else {
@@ -228,6 +251,25 @@ struct EpicManifest {
     launch_executable: String,
     #[serde(default, rename = "bIsIncompleteInstall")]
     incomplete: bool,
+}
+
+/// Epic discovery accepts only the manifest's exact launch executable.
+pub(super) fn epic_title_for_executable(executable: &str) -> Option<String> {
+    for root in Roots::discover().epic {
+        let Ok(entries)=std::fs::read_dir(root) else {continue;};
+        for entry in entries.flatten() {
+            if !entry.path().extension().is_some_and(|e| e.eq_ignore_ascii_case("item")) || entry.metadata().ok().is_none_or(|m| m.len()>1024*1024) { continue; }
+            let Ok(text)=std::fs::read_to_string(entry.path()) else {continue};
+            let Ok(manifest)=serde_json::from_str::<EpicManifest>(&text) else {continue};
+            if manifest.incomplete {continue;}
+            let Some(relative)=safe_relative(&manifest.launch_executable) else {continue};
+            if crate::macros::paths_match(executable,&manifest.install_location.join(relative).to_string_lossy()) {
+                let name=serde_json::from_str::<serde_json::Value>(&text).ok()?.get("DisplayName").and_then(|v| v.as_str()).map(str::to_owned).unwrap_or(manifest.app_name);
+                return Some(name);
+            }
+        }
+    }
+    None
 }
 
 fn scan_epic(roots: &[PathBuf], ids: &mut HashSet<String>) {
@@ -619,4 +661,5 @@ mod windows_registry {
 }
 
 #[cfg(test)]
+#[path = "install_scan/tests.rs"]
 mod tests;

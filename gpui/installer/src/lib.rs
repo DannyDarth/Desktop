@@ -1,3 +1,7 @@
+mod app_lock;
+mod startup;
+#[cfg(windows)]
+mod cleanup;
 pub mod colors;
 pub mod devices;
 pub mod paths;
@@ -23,6 +27,7 @@ pub struct StepUpdate {
 /// shortcut, the optional Desktop shortcut, and the Add/Remove Programs
 /// registry entry. `report` is called after each step for progress UI.
 pub fn install(desktop_shortcut: bool, mut report: impl FnMut(StepUpdate)) -> Result<(), String> {
+    ensure_app_closed()?;
     let total = if desktop_shortcut { 5 } else { 4 };
     let mut done = 0;
     let mut step = |label: &'static str, result: Result<(), String>, report: &mut dyn FnMut(StepUpdate)| {
@@ -60,6 +65,7 @@ pub fn install(desktop_shortcut: bool, mut report: impl FnMut(StepUpdate)) -> Re
 
     // Registry last: if anything above failed, Add/Remove Programs never
     // learns about a half-written install.
+    startup::update_existing()?;
     registry::write()
 }
 
@@ -67,23 +73,40 @@ pub fn install(desktop_shortcut: bool, mut report: impl FnMut(StepUpdate)) -> Re
 /// itself, which the caller must remove via [`spawn_self_delete`] once this
 /// process (and its lock on the directory/its own .exe) has exited.
 pub fn uninstall() -> Result<(), String> {
+    ensure_app_closed()?;
     shortcuts::remove_start_menu();
     shortcuts::remove_desktop();
     registry::remove()
 }
 
+/// Check before changing shortcuts or registration, so a running app leaves
+/// the existing installation intact. Opening never truncates the executable.
+fn ensure_app_closed() -> Result<(), String> {
+    app_lock::ensure_file_available(&paths::app_exe_path())
+}
+
 /// Windows won't let a running .exe delete its own containing directory.
 /// Spawns a detached helper that waits briefly for this process to exit,
-/// then removes the install directory — the standard self-delete trick
-/// NSIS-style uninstallers use internally.
+/// then removes only our binaries and the directory if it is empty.
 #[cfg(windows)]
 pub fn spawn_self_delete(install_dir: &std::path::Path) {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    let dir = install_dir.to_string_lossy().into_owned();
-    let command = format!("ping 127.0.0.1 -n 2 >nul & rmdir /s /q \"{dir}\"");
-    let _ = std::process::Command::new("cmd")
-        .args(["/C", &command])
+    // Paths are data, never interpolated into shell source. Only remove our
+    // known binaries; keep any extra files the user placed in the folder.
+
+    let shell = std::env::var_os("SystemRoot")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(r"C:\Windows"))
+        .join(r"System32\WindowsPowerShell\v1.0\powershell.exe");
+    let _ = std::process::Command::new(shell)
+        .args(["-NoProfile", "-NonInteractive", "-Command", cleanup::SCRIPT])
+        .env("OPENMOUSE_REMOVE_DIR", install_dir)
+        .env("OPENMOUSE_REMOVE_APP_NAME", payload::APP_EXE_NAME)
+        .env("OPENMOUSE_REMOVE_PID", std::process::id().to_string())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .creation_flags(CREATE_NO_WINDOW)
         .spawn();
 }

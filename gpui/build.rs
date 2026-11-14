@@ -6,6 +6,10 @@ use std::path::Path;
 use std::process::Command;
 
 fn main() {
+    println!("cargo:rerun-if-env-changed=GITHUB_SHA");
+    let revision = std::env::var("GITHUB_SHA").unwrap_or_else(|_| "local".into());
+    let revision: String = revision.chars().filter(|c| c.is_ascii_alphanumeric()).take(12).collect();
+    println!("cargo:rustc-env=OPENMOUSE_BUILD={revision}");
     // 16 MiB main-thread stack (Windows default is 1 MiB): a debug build of the
     // device page (dozens of controls in nested flex rows) overflows 1 MiB.
     if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
@@ -16,6 +20,7 @@ fn main() {
     println!("cargo:rerun-if-changed=js/shims");
     println!("cargo:rerun-if-changed=js/lib");
     println!("cargo:rerun-if-changed=../node_modules/@openmouse/protocol/dist");
+    println!("cargo:rerun-if-changed=../node_modules/@openmouse/keyboard-protocol/dist");
 
     if !Path::new("../node_modules/esbuild").exists() {
         panic!("gpui: run `npm install` in the repo root first (esbuild builds the embedded protocol bundle)");

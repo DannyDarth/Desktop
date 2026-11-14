@@ -28,7 +28,7 @@ on:
       - "v*.*.*"
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   release:
@@ -37,6 +37,8 @@ jobs:
       TAG: ${{ github.event.inputs.tag || github.ref_name }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Check the tag matches the app version
         shell: bash
@@ -67,6 +69,16 @@ jobs:
       - name: Install JS dependencies
         run: npm ci
 
+      - name: Audit JavaScript dependencies
+        run: npm audit --audit-level=low
+
+      - name: Audit Rust dependencies
+        shell: bash
+        run: |
+          cargo install cargo-audit --version 0.23.0 --locked
+          cargo audit --file gpui/Cargo.lock --deny unsound --deny yanked
+          cargo audit --file gpui/installer/Cargo.lock --deny unsound --deny yanked
+
       # A tag can point at any commit, so don't publish without the tests.
       # Cheap now: the shared cache already holds the test build.
       - name: Test
@@ -90,13 +102,43 @@ jobs:
           node .github/scripts/make-release-files.mjs "$TAG" release/OpenMouseDesktopSetup.exe "$GITHUB_REPOSITORY" release
           cat release/latest.json
 
+      - name: Package portable release and checksums
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force release-portable | Out-Null
+          Copy-Item gpui/target/release/openmouse-gpui.exe release-portable/OpenMouseDesktop.exe
+          Copy-Item .github/portable-readme.txt release-portable/README.txt
+          "Commit: $env:GITHUB_SHA" | Set-Content release-portable/BUILD.txt
+          Compress-Archive -Path release-portable/* -DestinationPath release/OpenMouseDesktopPortable.zip
+          node .github/scripts/sha256-files.mjs release/SHA256SUMS.txt release/OpenMouseDesktopSetup.exe release/OpenMouseDesktopPortable.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-files
+          path: release/
+          if-no-files-found: error
+
+  publish:
+    needs: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-files
+          path: release
+
       - name: Publish release
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release create "$TAG" \
-            release/OpenMouseDesktopSetup.exe release/latest.json \
+            release/OpenMouseDesktopSetup.exe release/OpenMouseDesktopPortable.zip release/SHA256SUMS.txt release/latest.json \
             --title "OpenMouse Desktop $TAG" \
             --notes-file release/notes.md \
             --target "$GITHUB_SHA" \

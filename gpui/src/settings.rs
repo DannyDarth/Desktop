@@ -27,6 +27,8 @@ pub const MAX_VIBRANCY: f32 = 200.0;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct StoredSettings {
+    #[serde(default)]
+    powerplay_receivers: Vec<String>,
     /// Last sampled Dynamic accent as [r, g, b] (mirrors DYNAMIC_HEX_KEY):
     /// lets a relaunch repaint the real color instantly instead of flashing
     /// the fallback green before the background sample lands.
@@ -101,6 +103,7 @@ fn default_vibrancy() -> f32 {
 impl Default for StoredSettings {
     fn default() -> Self {
         Self {
+            powerplay_receivers: Vec::new(),
             launch_on_startup: false,
             discord_presence: false,
             discord_show_device: true,
@@ -125,6 +128,7 @@ impl Default for StoredSettings {
 /// Live settings owned by [`crate::app::AppView`].
 #[derive(Debug, Clone)]
 pub struct Settings {
+    pub powerplay_receivers: Vec<String>,
     pub dynamic_hex: Option<(u8, u8, u8)>,
 
     /// Placeholder: LaunchAgent/plist wiring lands with autostart support.
@@ -186,6 +190,7 @@ impl Settings {
             .and_then(|text| serde_json::from_str(&text).ok())
             .unwrap_or_default();
         Self {
+            powerplay_receivers: stored.powerplay_receivers,
             dynamic_hex: stored.dynamic_hex.map(|[r, g, b]| (r, g, b)),
             launch_on_startup: stored.launch_on_startup,
             discord_presence: stored.discord_presence,
@@ -214,6 +219,7 @@ impl Settings {
             let _ = std::fs::create_dir_all(parent);
         }
         let stored = StoredSettings {
+            powerplay_receivers: self.powerplay_receivers.clone(),
             dynamic_hex: self.dynamic_hex.map(|(r, g, b)| [r, g, b]),
             launch_on_startup: self.launch_on_startup,
             discord_presence: self.discord_presence,
@@ -235,5 +241,22 @@ impl Settings {
         if let Ok(text) = serde_json::to_string_pretty(&stored) {
             let _ = std::fs::write(path, text);
         }
+    }
+}
+
+#[cfg(test)]
+mod receiver_alias_tests {
+    use super::StoredSettings;
+    #[test]
+    fn receiver_alias_is_optional_and_preserves_exact_device_identity() {
+        let mut settings = StoredSettings::default();
+        assert!(settings.powerplay_receivers.is_empty());
+        settings.powerplay_receivers.push("receiver-path-1".into());
+        let saved = serde_json::to_value(&settings).unwrap();
+        let restored: StoredSettings = serde_json::from_value(saved.clone()).unwrap();
+        assert_eq!(restored.powerplay_receivers, vec!["receiver-path-1"]);
+        let mut legacy = saved;
+        legacy.as_object_mut().unwrap().remove("powerplay_receivers");
+        assert!(serde_json::from_value::<StoredSettings>(legacy).unwrap().powerplay_receivers.is_empty());
     }
 }

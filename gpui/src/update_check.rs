@@ -31,8 +31,8 @@ pub struct UpdateInfo {
 /// the updater JSON are ignored entirely at this stage.
 pub fn fetch_latest() -> Option<UpdateInfo> {
     let output = crate::proc::quiet(
-        std::process::Command::new("curl")
-            .args(["-sSfL", "-m", "10"])
+        crate::proc::curl()
+            .args(["-sSfL", "-m", "10", "--max-filesize", "1048576"])
             .arg(LATEST_JSON_URL)
             .stdin(std::process::Stdio::null())
             .stderr(std::process::Stdio::null()),

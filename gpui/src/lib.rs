@@ -18,3 +18,12 @@ pub mod theme;
 pub mod update_check;
 #[cfg(windows)]
 mod wallpaper_win;
+
+pub mod macros;
+
+pub mod firmware;
+
+#[cfg(windows)]
+pub mod single_instance;
+
+pub mod lighting_preferences;

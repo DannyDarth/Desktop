@@ -11,10 +11,9 @@ use sysinfo::{ProcessRefreshKind, ProcessStatus, ProcessesToUpdate, System, Upda
 
 const PROCESS_INTERVAL: Duration = Duration::from_secs(2);
 const INSTALL_INTERVAL: Duration = Duration::from_secs(10);
-// While the window is not active the scans slow down rather than stop: a game
-// can still launch behind the window and its profile should still apply, just
-// a few seconds later. Coming back to the window rescans straight away.
-const PROCESS_INTERVAL_INACTIVE: Duration = Duration::from_secs(10);
+// Keep running-game checks responsive in the background; only installation
+// scans slow down while inactive. Returning to the window rescans immediately.
+const PROCESS_INTERVAL_INACTIVE: Duration = PROCESS_INTERVAL;
 const INSTALL_INTERVAL_INACTIVE: Duration = Duration::from_secs(60);
 
 /// Dropping the view drops these tasks, including any awaited background task.
@@ -22,6 +21,7 @@ const INSTALL_INTERVAL_INACTIVE: Duration = Duration::from_secs(60);
 pub(crate) struct GameWatcher {
     _processes: Task<()>,
     _installations: Task<()>,
+    _discovery: Task<()>,
 }
 
 impl GameWatcher {
@@ -90,9 +90,67 @@ impl GameWatcher {
                     .await;
             }
         });
+        let discovery = cx.spawn(async move |view, cx| {
+            if !cfg!(windows) {
+                return;
+            }
+            let Ok(with_macros) = view.update(cx, |v, _| v.profile_ids_with_macros()) else {
+                return;
+            };
+            let cleanup = cx
+                .background_executor()
+                .spawn(async move {
+                    let removed = games::custom::cleanup_empty_duplicates(&with_macros)?;
+                    Ok::<_, String>((games::load_catalog(), removed))
+                })
+                .await;
+            if view
+                .update(cx, |v, cx| match cleanup {
+                    Ok((catalog, removed)) => v.apply_profile_cleanup(catalog, removed, cx),
+                    Err(error) => v.report_game_discovery_error(error, cx),
+                })
+                .is_err()
+            {
+                return;
+            }
+            let mut seen = std::collections::HashSet::new();
+            loop {
+                let result = cx
+                    .background_executor()
+                    .spawn(async {
+                        let path = games::discovery::foreground_executable();
+                        path
+                    })
+                    .await;
+                if let Some(path) = result {
+                    let key = path.replace('\\', "/").to_ascii_lowercase();
+                    if seen.insert(key) {
+                        let result = cx
+                            .background_executor()
+                            .spawn(async move { games::discovery::discover(&path) })
+                            .await;
+                        if view
+                            .update(cx, |v, cx| match result {
+                                Ok(Some(found)) => v.apply_discovered_game(found, cx),
+                                Err(error) => v.report_game_discovery_error(error, cx),
+                                _ => {}
+                            })
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                }
+                if view.update(cx, |_, _| ()).is_err() {
+                    break;
+                }
+                cx.background_executor().timer(Duration::from_secs(2)).await;
+            }
+        });
         Self {
             _processes: processes,
             _installations: installations,
+            _discovery: discovery,
         }
     }
 }
@@ -137,6 +195,26 @@ impl RunningTracker {
     }
 
     fn poll(&mut self) -> Vec<GameUpdate> {
+        let catalog = games::load_catalog();
+        if catalog
+            .iter()
+            .map(|g| &g.id)
+            .ne(self.matches.game_ids.iter())
+            || catalog.iter().any(|g| {
+                g.executables
+                    .iter()
+                    .filter(|e| e.contains(['\\', '/']))
+                    .any(|p| {
+                        !self
+                            .matches
+                            .paths
+                            .iter()
+                            .any(|(old, _)| crate::macros::paths_match(old, p))
+                    })
+            })
+        {
+            self.matches = ProcessMatches::new(catalog, cfg!(target_os = "macos"));
+        }
         // Retain System and refresh just executable identity, not CPU, memory,
         // command lines or Linux threads. Remove exited processes on every poll.
         self.system.refresh_processes_specifics(
@@ -162,6 +240,9 @@ impl RunningTracker {
                 .unwrap_or_else(|| process.name());
             if let Some(name) = name.to_str() {
                 self.matches.observe(name);
+                if let Some(path) = process.exe().and_then(|p| p.to_str()) {
+                    self.matches.observe_path(path);
+                }
             }
         }
         self.matches.finish_poll()
@@ -174,14 +255,26 @@ struct ProcessMatches {
     running: Vec<bool>,
     next_running: Vec<bool>,
     name_buffer: String,
+    paths: Vec<(String, usize)>,
 }
 
 impl ProcessMatches {
     fn new(catalog: Vec<Game>, macos: bool) -> Self {
         let mut executables: HashMap<String, Vec<usize>> = HashMap::new();
         let mut game_ids = Vec::with_capacity(catalog.len());
+        let mut paths = Vec::new();
         for (index, game) in catalog.into_iter().enumerate() {
+            if let Some(path) = &game.executable_path {
+                paths.push((path.clone(), index));
+            }
             for executable in game.executables {
+                if executable.contains(['\\', '/']) {
+                    paths.push((executable, index));
+                    continue;
+                }
+                if game.executable_path.is_some() {
+                    continue;
+                }
                 let name = executable_basename(&executable).to_ascii_lowercase();
                 if name.is_empty() {
                     continue;
@@ -213,6 +306,7 @@ impl ProcessMatches {
             running: vec![false; count],
             next_running: vec![false; count],
             name_buffer: String::new(),
+            paths,
         }
     }
 
@@ -220,6 +314,13 @@ impl ProcessMatches {
         self.next_running.fill(false);
     }
 
+    fn observe_path(&mut self, path: &str) {
+        for (expected, index) in &self.paths {
+            if crate::macros::paths_match(expected, path) {
+                self.next_running[*index] = true;
+            }
+        }
+    }
     fn observe(&mut self, name: &str) {
         // Reuse one buffer rather than allocating for every system process.
         self.name_buffer.clear();
@@ -292,6 +393,8 @@ mod tests {
 
     fn game(id: &str, executable: &str) -> Game {
         Game {
+            executable_path: None,
+            profile_image: None,
             id: id.into(),
             name: format!("Name {id}"),
             artwork: Some(format!("https://example.com/{id}.jpg")),
@@ -429,5 +532,18 @@ mod tests {
         let updates = poll(&mut matcher, &["shared.exe"]);
         assert_eq!(updates.len(), 2);
         assert!(updates.iter().all(|update| update.running == Some(true)));
+    }
+    #[test]
+    fn personal_executable_matches_only_its_selected_installation() {
+        let mut personal = game("custom:hd2", "helldivers2.exe");
+        personal.executable_path = Some(r"C:\Games\HD2\helldivers2.exe".into());
+        let mut matches = ProcessMatches::new(vec![personal], false);
+        matches.begin_poll();
+        matches.observe("helldivers2.exe");
+        assert!(!matches.next_running[0]);
+        matches.observe_path(r"D:\Other\helldivers2.exe");
+        assert!(!matches.next_running[0]);
+        matches.observe_path(r"C:\Games\HD2\HELLDIVERS2.EXE");
+        assert!(matches.next_running[0]);
     }
 }

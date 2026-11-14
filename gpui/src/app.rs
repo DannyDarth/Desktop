@@ -1,3 +1,6 @@
+mod macros_view;
+mod custom_games_view;
+mod firmware_view;
 use crate::games::{self, Game};
 use crate::settings::{Settings, MAX_BLUR, MAX_VIBRANCY, MIN_OPACITY};
 use crate::theme::ThemeChoice;
@@ -163,6 +166,7 @@ pub enum Page {
     Overview,
     Games,
     Supported,
+    Macros,
     Settings,
     /// Version and release notes; opened from the sidebar footer, not the nav list.
     Updates,
@@ -174,6 +178,7 @@ impl Page {
             Page::Overview => "Overview",
             Page::Games => "Games",
             Page::Supported => "Supported mice",
+            Page::Macros => "Macros",
             Page::Settings => "Settings",
             Page::Updates => "Updates",
         }
@@ -184,6 +189,7 @@ impl Page {
             Page::Overview => IconName::LayoutDashboard,
             Page::Games => IconName::Gamepad2,
             Page::Supported => IconName::BookOpen,
+            Page::Macros => IconName::Keyboard,
             Page::Settings => IconName::Settings,
             Page::Updates => IconName::CircleArrowUp,
         }
@@ -307,6 +313,7 @@ enum DeviceTab {
     Advanced,
     /// The mouse's own stored profiles (Logitech).
     Profiles,
+    Firmware,
 }
 
 impl DeviceTab {
@@ -317,6 +324,7 @@ impl DeviceTab {
             DeviceTab::Lighting => "Lighting",
             DeviceTab::Advanced => "Advanced",
             DeviceTab::Profiles => "Profiles",
+            DeviceTab::Firmware => "Firmware",
         }
     }
 }
@@ -355,6 +363,8 @@ fn hex_color(hex: &str) -> Hsla {
 }
 
 struct Tile {
+    usb_id: String,
+    powerplay: bool,
     key: String,
     name: String,
     /// The registry's label for the driver; what gating and write routing use.
@@ -363,6 +373,17 @@ struct Tile {
     display_brand: String,
     art: Option<LoadedArt>,
     status: TileStatus,
+}
+
+impl Tile {
+    fn identifying_receiver(&self) -> bool {
+        matches!(self.status, TileStatus::Idle | TileStatus::Connecting)
+            && (self.powerplay || self.name.to_ascii_lowercase().contains("receiver"))
+    }
+
+    fn display_name(&self) -> &str {
+        if self.identifying_receiver() { "USB Receiver" } else { &self.name }
+    }
 }
 
 struct LoadedArt {
@@ -385,6 +406,7 @@ struct DeviceReadout {
     /// The driver's own UI hints (`MouseUiHints`): what is meaningful for this
     /// protocol generation.
     polling_read_only: bool,
+    keyboard: bool,
     hide_lod_low: bool,
     lod_requires_surface: bool,
     /// A Logitech mouse with stored profiles the library can read.
@@ -403,6 +425,7 @@ struct DeviceReadout {
     polling_hz: Option<f64>,
     connection: Option<String>,
     firmware: Vec<String>,
+    firmware_info: crate::firmware::FirmwareInfo,
 }
 
 impl DeviceReadout {
@@ -416,9 +439,11 @@ impl DeviceReadout {
         };
         let ui_flag = |k: &str| s.get("ui").and_then(|u| u.get(k)).and_then(|v| v.as_bool()).unwrap_or(false);
         Self {
+            firmware_info: crate::firmware::FirmwareInfo::from_status(s),
             dpi_y: num("dpiY"),
             separate_axes: s.get("supportsSeparateDpiAxes").and_then(|v| v.as_bool()).unwrap_or(false),
             polling_read_only: ui_flag("pollingReadOnly"),
+            keyboard: s.get("logitech").is_some() && s.get("ui").and_then(|u| u.get("settingsReady")).and_then(|v| v.as_bool()) == Some(false),
             hide_lod_low: ui_flag("hideLodLow"),
             lod_requires_surface: ui_flag("lodRequiresSurface"),
             onboard_profiles: s
@@ -461,6 +486,17 @@ pub struct AppView {
     page: Page,
     sidebar_collapsed: bool,
     settings: Settings,
+    macro_engine: crate::macros::Engine,
+    macro_scope: Option<String>,
+    macro_last_active: Option<String>,
+    macro_last_focused: Option<String>,
+    macro_notice_pending: Option<crate::overlay::ProfileNotice>,
+    macro_notice_since: Option<std::time::Instant>,
+    macro_text_edit: Option<macros_view::MacroTextEdit>,
+    game_delete_pending: Option<String>,
+    firmware_checks: std::collections::HashMap<String,crate::firmware::CheckState>,
+    game_art_busy: bool,
+    macro_selected: Option<usize>,
     games: Vec<Game>,
     devices: Devices,
     hid: Option<crate::hid::HidService>,
@@ -606,6 +642,17 @@ impl AppView {
         let game_watcher = crate::game_watcher::GameWatcher::start(cx);
         let mut view = Self {
             page: Page::Overview,
+            macro_engine: crate::macros::Engine::load(),
+            macro_scope: None,
+            macro_last_active: None,
+            macro_last_focused: None,
+            macro_notice_pending: None,
+            macro_notice_since: None,
+            macro_text_edit: None,
+            game_delete_pending: None,
+            firmware_checks: Default::default(),
+            game_art_busy: false,
+            macro_selected: None,
             sidebar_collapsed: false,
             settings,
             games,
@@ -644,7 +691,18 @@ impl AppView {
         if view.settings.discord_presence {
             view.set_discord(true, cx);
         }
+        view.macro_engine.start(games::macro_targets(&view.games));
+        cx.spawn(async move |view, cx| {
+            loop {
+                futures_timer::Delay::new(Duration::from_millis(150)).await;
+                if view.update(cx, |v, cx| {
+                    v.sync_macro_profile_notice(cx);
+                    if v.page == Page::Macros { cx.notify(); }
+                }).is_err() { break; }
+            }
+        }).detach();
         view.scan_devices(cx);
+        view.watch_keyboard_cycle_errors(cx);
         view
     }
 
@@ -662,6 +720,17 @@ impl Default for AppView {
             control_sliders: Default::default(),
             slider_live: Default::default(),
             slider_seq: 0,
+            macro_engine: crate::macros::Engine::load(),
+            macro_scope: None,
+            macro_last_active: None,
+            macro_last_focused: None,
+            macro_notice_pending: None,
+            macro_notice_since: None,
+            macro_text_edit: None,
+            game_delete_pending: None,
+            firmware_checks: Default::default(),
+            game_art_busy: false,
+            macro_selected: None,
             sidebar_collapsed: false,
             settings: Settings::default(),
             games: Vec::new(),
@@ -782,7 +851,35 @@ impl AppView {
         self.hid.get_or_insert_with(crate::hid::HidService::start).clone()
     }
 
-    /// Lists supported devices, loads their artwork, and connects the first.
+    fn watch_keyboard_cycle_errors(&mut self, cx: &mut Context<Self>) {
+        let service = self.hid_service();
+        cx.spawn(async move |view, cx| {
+            loop {
+                futures_timer::Delay::new(Duration::from_secs(2)).await;
+                if view.update(cx, |_, _| ()).is_err() { break; }
+                let Ok(Ok(errors)) = service.keyboard_cycle_errors().await else { break; };
+                if errors.is_empty() { continue; }
+                if view.update(cx, |v: &mut Self, cx| {
+                    for (key, error) in errors {
+                        if v.devices.tiles.get(v.devices.selected).is_some_and(|t| t.key == key) {
+                            v.devices.write_error = Some(error.clone());
+                        }
+                        if let Some(Tile { status: TileStatus::Connected(r), .. }) = v.devices.tiles.iter_mut().find(|t| t.key == key) {
+                            for section in &mut r.tabs.keyboard_lighting {
+                                for control in &mut section.controls {
+                                    if control.id == "keyboard.effect" { control.current = serde_json::Value::Null; }
+                                }
+                            }
+                        }
+                        v.show_toast(error, true, cx);
+                    }
+                    cx.notify();
+                }).is_err() { break; }
+            }
+        }).detach();
+    }
+
+    /// Lists supported devices and connects each idle device sequentially.
     /// Everything blocking runs on `crate::hid`'s threads or the background
     /// executor.
     fn scan_devices(&mut self, cx: &mut Context<Self>) {
@@ -817,10 +914,16 @@ impl AppView {
                     .iter()
                     .map(|c| {
                         match old.iter().position(|t| t.key == c.info.key) {
-                            Some(i) => old.swap_remove(i),
+                            Some(i) => {
+                                let mut tile = old.swap_remove(i);
+                                if matches!(tile.status, TileStatus::Failed(_)) { tile.status = TileStatus::Idle; }
+                                tile
+                            },
                             None => Tile {
+                                usb_id: format!("{:04X}:{:04X}", c.info.vendor_id, c.info.product_id),
+                                powerplay: (c.info.vendor_id == 0x046d && c.info.product_id == 0xc53a) || v.settings.powerplay_receivers.contains(&c.info.key),
                                 key: c.info.key.clone(),
-                                name: c.info.product_string.clone(),
+                                name: if (c.info.vendor_id == 0x046d && c.info.product_id == 0xc53a) || v.settings.powerplay_receivers.contains(&c.info.key) { "POWERPLAY".into() } else { c.info.product_string.clone() },
                                 brand: c.brands.first().cloned().unwrap_or_default(),
                                 display_brand: c.brands.first().cloned().unwrap_or_default(),
                                 art: None,
@@ -831,6 +934,7 @@ impl AppView {
                     .collect();
                 v.devices.selected = v.devices.selected.min(v.devices.tiles.len().saturating_sub(1));
                 v.devices.scanning = false;
+                v.connect_next_device(cx);
                 cx.notify();
             });
             for c in &candidates {
@@ -854,14 +958,7 @@ impl AppView {
                 }
                 Self::load_art(&service, &c.info.key, &name, &view, cx).await;
             }
-            let _ = view.update(cx, |v: &mut Self, cx| {
-                if let Some(tile) = v.devices.tiles.first() {
-                    if matches!(tile.status, TileStatus::Idle) {
-                        let key = tile.key.clone();
-                        v.connect_tile(&key, false, cx);
-                    }
-                }
-            });
+
         })
         .detach();
     }
@@ -1083,7 +1180,7 @@ impl AppView {
                         }
                         if let Some(tile) = v.devices.tiles.iter_mut().find(|t| t.key == key) {
                             if let TileStatus::Connected(r) = &mut tile.status {
-                                for section in r.tabs.buttons.iter_mut().chain(r.tabs.advanced.iter_mut()).chain(r.tabs.performance.iter_mut()) {
+                                for section in r.tabs.buttons.iter_mut().chain(r.tabs.advanced.iter_mut()).chain(r.tabs.performance.iter_mut()).chain(r.tabs.keyboard_lighting.iter_mut()) {
                                     for control in &mut section.controls {
                                         if control.id == id {
                                             control.current = value.clone();
@@ -1317,6 +1414,18 @@ impl AppView {
         cx.notify();
     }
 
+    /// One probe at a time, including receivers; failures stay retryable
+    /// without preventing the remaining devices from being connected.
+    fn connect_next_device(&mut self, cx: &mut Context<Self>) {
+        if self.devices.tiles.iter().any(|t| matches!(t.status, TileStatus::Connecting)) { return; }
+        let next = self.devices.tiles.iter().find(|t| matches!(t.status, TileStatus::Idle)).map(|t| t.key.clone());
+        if let Some(key) = next {
+            let selected = self.devices.selected;
+            self.connect_tile(&key, false, cx);
+            self.devices.selected = selected;
+        }
+    }
+
     /// Opens one device, finds the driver that answers and reads its status.
     fn connect_tile(&mut self, key: &str, quiet: bool, cx: &mut Context<Self>) {
         let Some(index) = self.devices.tiles.iter().position(|t| t.key == key) else { return };
@@ -1364,7 +1473,10 @@ impl AppView {
                 }
                 if connected_now {
                     v.sync_running_profiles(cx);
+                    v.check_firmware_source(key.clone(),cx);
+                    v.hid_service().restore_keyboard_lighting();
                 }
+                v.connect_next_device(cx);
                 v.refresh_presence(cx);
                 cx.notify();
             });
@@ -1398,12 +1510,17 @@ impl AppView {
             cx.notify();
             self.refresh_presence(cx);
         }
+        let mut running: Vec<String> = self.games.iter().filter(|g| g.running && !started.contains(&g.id)).map(|g| g.id.clone()).collect();
+        running.extend(started.iter().cloned());
+        let macro_changed = self.macro_engine.sync_games(running);
         for id in closed {
             self.on_game_closed(&id, cx);
         }
+        if !started.is_empty() {self.hid_service().restore_keyboard_lighting();}
         for id in started {
             self.on_game_started(&id, cx);
         }
+        if macro_changed { self.sync_macro_profile_notice(cx); }
     }
 
     // ── toasts ───────────────────────────────────────────────────────────
@@ -1423,6 +1540,51 @@ impl AppView {
             });
         })
         .detach();
+    }
+
+    fn log_profile_transition(state:&crate::macros::Snapshot,notifications:bool,event:&str) {
+        use std::io::Write;
+        let Some(dir)=dirs::config_dir().map(|p|p.join("openmouse")) else {return};
+        let _=std::fs::create_dir_all(&dir);let path=dir.join("profile-switch.log");
+        let reset=std::fs::metadata(&path).is_ok_and(|m|m.len()>256*1024);
+        if let Ok(mut file)=std::fs::OpenOptions::new().create(true).write(true).append(!reset).truncate(reset).open(path) {
+            let value=serde_json::json!({"time":std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok().map(|t|t.as_secs()),"event":event,"active":state.active_game,"focused":state.focused_game,"whileFocused":state.active_game.as_ref().is_some_and(|id|state.library.focus_only.contains(id)),"notifications":notifications});
+            let _=writeln!(file,"{value}");
+        }
+    }
+
+    /// Queue the newest profile change while Alt/Windows is held. This keeps
+    /// the full popup lifetime visible after the OS switcher has been released.
+    fn sync_macro_profile_notice(&mut self, cx: &mut Context<Self>) {
+        let state = self.macro_engine.snapshot();
+        if state.focused_game != self.macro_last_focused || state.active_game != self.macro_last_active {
+            Self::log_profile_transition(&state,self.settings.overlay_enabled,"state changed");
+            self.macro_last_focused=state.focused_game.clone();
+        }
+        if state.active_game != self.macro_last_active {
+            self.macro_last_active = state.active_game.clone();
+            self.hid_service().restore_keyboard_lighting();
+            self.macro_scope = state.active_game.clone(); self.macro_selected = None; self.macro_text_edit = None;
+            if self.settings.overlay_enabled {
+                let (title, subtitle, detail) = match state.active_game.as_deref() {
+                    Some(id) => (crate::games::notification_title(&self.game_name(id)), if state.library.enabled { "Macro profile active" } else { "Macro profile selected" },
+                        if !state.library.enabled { "Automatic triggers off" } else if state.library.focus_only.contains(id) { "While focused" } else { "While running" }),
+                    None => ("Default profile".to_string(), if state.library.enabled { "Desktop macros active" } else { "Desktop profile selected" },
+                        if state.library.enabled { "Game is no longer focused" } else { "Automatic triggers off" }),
+                };
+                self.macro_notice_pending = Some(crate::overlay::ProfileNotice {title,subtitle:subtitle.into(),detail:detail.into()});
+                self.macro_notice_since=Some(std::time::Instant::now());
+            }
+            cx.notify();
+        }
+        if !self.settings.overlay_enabled {self.macro_notice_pending=None;self.macro_notice_since=None;return;}
+        if self.macro_engine.profile_notice_ready() || self.macro_notice_since.is_some_and(|since|since.elapsed()>=Duration::from_secs(2)) {
+            if let Some(notice)=self.macro_notice_pending.take() {
+                self.macro_notice_since=None;
+                self.overlay=crate::overlay::show_profile(cx,self.overlay.take(),notice);
+                Self::log_profile_transition(&state,true,if self.overlay.is_some() {"popup opened"}else{"popup failed"});
+            }
+        }
     }
 
     /// A message about a game: on the screen overlay (the game has focus, so
@@ -2147,12 +2309,9 @@ impl AppView {
 
     fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let collapsed = self.sidebar_collapsed;
-        let fg = cx.theme().foreground;
-        let border = cx.theme().border;
-        let accent = cx.theme().primary;
 
         let mut nav = div().flex().flex_col().gap_1();
-        for (id, page) in [("nav-overview", Page::Overview), ("nav-games", Page::Games), ("nav-supported", Page::Supported)] {
+        for (id, page) in [("nav-overview", Page::Overview), ("nav-games", Page::Games), ("nav-macros", Page::Macros), ("nav-settings", Page::Settings)] {
             nav = nav.child(self.nav_row(id, page.icon(), page.label(), self.page == page, collapsed, cx).on_click(
                 cx.listener(move |this, _, _, cx| {
                     // Choosing the page you are on goes back to its top level.
@@ -2167,41 +2326,6 @@ impl AppView {
             ));
         }
 
-        let discord = img(themed_discord(cx.theme().muted_foreground)).w(px(22.)).h(px(17.)).into_any_element();
-        let on_updates = self.page == Page::Updates;
-        let on_settings = self.page == Page::Settings;
-        let tone = |active: bool| if active { accent } else { cx.theme().muted_foreground };
-        let updates_icon = Icon::new(Page::Updates.icon()).size(px(18.)).text_color(tone(on_updates)).into_any_element();
-        let gear = Icon::new(Page::Settings.icon()).size(px(18.)).text_color(tone(on_settings)).into_any_element();
-        let footer = div()
-            .flex()
-            .flex_col()
-            .rounded_xl()
-            .border_1()
-            .border_color(Hsla { a: 0.8, ..border })
-            .bg(Hsla { a: 0.04, ..fg })
-            .overflow_hidden()
-            .child(
-                self.footer_row("footer-updates", updates_icon, "Updates", Some(&format!("v{APP_VERSION} · Release notes")), on_updates, collapsed, cx)
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.page = Page::Updates;
-                        cx.notify();
-                    })),
-            )
-            .child(div().h(px(1.)).w_full().bg(Hsla { a: 0.8, ..border }))
-            .child(
-                self.footer_row("footer-discord", discord, "Help & Feedback", Some("Join the community server"), false, collapsed, cx)
-                    .on_click(cx.listener(|_, _, _, cx| cx.open_url(DISCORD_INVITE_URL))),
-            )
-            .child(div().h(px(1.)).w_full().bg(Hsla { a: 0.8, ..border }))
-            .child(
-                self.footer_row("footer-settings", gear, Page::Settings.label(), None, self.page == Page::Settings, collapsed, cx)
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.page = Page::Settings;
-                        cx.notify();
-                    })),
-            );
-        let _ = accent;
 
         div()
             .flex()
@@ -2215,7 +2339,6 @@ impl AppView {
             .gap_6()
             .child(nav)
             .child(div().flex_1())
-            .child(footer)
     }
 
     fn render_titlebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -2288,6 +2411,7 @@ impl AppView {
     }
 
     fn render_page(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        if self.page == Page::Macros { return self.render_macros(cx); }
         if self.page == Page::Settings {
             return self.render_settings(window, cx);
         }
@@ -2334,8 +2458,43 @@ impl AppView {
     /// the box (the Tauri app's `deviceArtStyle` normalisation, so every
     /// model's subject comes out a comparable size); `zoom` scales that up
     /// where the art should dominate.
+    fn identify_powerplay(&mut self, key: &str, enabled: bool, cx: &mut Context<Self>) {
+        self.settings.powerplay_receivers.retain(|saved| saved != key);
+        if enabled { self.settings.powerplay_receivers.push(key.into()); }
+        self.settings.save();
+        if let Some(tile) = self.devices.tiles.iter_mut().find(|tile| tile.key == key) {
+            tile.powerplay = enabled || tile.usb_id == "046D:C53A";
+            if !matches!(tile.status, TileStatus::Connected(_)) {
+                tile.name = if tile.powerplay { "POWERPLAY" } else { "USB Receiver" }.into();
+            }
+        }
+        cx.notify();
+    }
+
     fn device_art(&self, tile: &Tile, side: f32, zoom: f32) -> Div {
         let frame = div().relative().flex_none().w(px(side)).h(px(side)).overflow_hidden();
+        if tile.identifying_receiver() {
+            return frame.flex().items_center().justify_center().child(
+                div().flex().flex_col().items_center().gap_3()
+                    .child(div().w(px(52.)).h(px(76.)).rounded_lg()
+                        .border_2().border_color(rgb(0x67727a)).bg(rgb(0x292e33)))
+                    .child(div().text_sm().text_color(rgb(0x9da7ae)).child("Identifying device…")));
+        }
+        if tile.powerplay && !matches!(tile.status, TileStatus::Connected(_)) {
+            return frame.flex().items_center().justify_center().child(
+                div().relative().w(relative(0.9)).h(relative(0.68)).rounded_xl()
+                    .bg(rgb(0x171a1d)).border_2().border_color(rgb(0x3b444a))
+                    .child(div().absolute().top_0().left_0().w_full().h(relative(0.18))
+                        .rounded_lg().bg(rgb(0x292e33)))
+                    .child(div().absolute().top(relative(0.28)).left_0().w_full()
+                        .text_center().text_xl().font_weight(FontWeight::BOLD)
+                        .text_color(rgb(0x45b5d1)).child("POWERPLAY"))
+                    .child(div().absolute().bottom(relative(0.12)).left_0().w_full()
+                        .text_center().text_sm().text_color(rgb(0x9da7ae)).child("Charging pad / receiver")));
+        }
+        if (matches!(&tile.status, TileStatus::Connected(r) if r.keyboard) || tile.name.to_ascii_lowercase().contains("g915") || tile.name.to_ascii_lowercase().contains("keyboard")) && !tile.art.as_ref().is_some_and(|a| a.path.file_name().is_some_and(|f| f.to_string_lossy().starts_with("logitech-g915-x-"))) {
+            return frame.flex().items_center().justify_center().child(Self::keyboard_graphic(side, &tile.name));
+        }
         let Some(art) = &tile.art else { return frame };
         let image = img(art.path.clone());
         match &art.placement {
@@ -2356,6 +2515,28 @@ impl AppView {
             }
             None => frame.child(image.size_full().object_fit(ObjectFit::Contain)),
         }
+    }
+
+    /// A code-drawn keyboard illustration, sized for each card. It remains
+    /// available offline and uses a compact layout for TKL models.
+    fn keyboard_graphic(side: f32, name: &str) -> Div {
+        let width = side * 0.90;
+        let columns = if name.to_ascii_lowercase().contains("tkl") { 16 } else { 20 };
+        let key = width / (columns as f32 + 2.);
+        let glow = rgb(0x4ade80);
+        let mut board = div().flex().flex_col().gap(px(key * 0.17)).p(px(key * 0.6))
+            .rounded(px(key * 0.4)).bg(rgb(0x171b1b)).border_1().border_color(rgb(0x596363));
+        for row in 0..6 {
+            let mut line = div().flex().gap(px(key * 0.17));
+            for column in 0..columns {
+                if row == 5 && column > 3 && column < 10 { continue; }
+                let space = row == 5 && column == 3;
+                line = line.child(div().w(px(if space { key * 8.02 } else { key })).h(px(key * 0.85))
+                    .rounded(px(key * 0.13)).bg(rgb(0x272e2e)).border_1().border_color(glow));
+            }
+            board = board.child(line);
+        }
+        board
     }
 
     /// Selectable pill used for the page's option lists.
@@ -2395,6 +2576,7 @@ impl AppView {
             .iter()
             .chain(&r.tabs.buttons)
             .chain(&r.tabs.advanced)
+            .chain(&r.tabs.keyboard_lighting)
             .flat_map(|s| s.controls.iter())
             .filter(|c| c.kind == "number" || c.kind == "stepped")
             .cloned()
@@ -2482,6 +2664,13 @@ impl AppView {
     fn render_control(&self, c: &crate::hid::ControlSpec, cx: &mut Context<Self>) -> AnyElement {
         let fg = cx.theme().foreground;
         let muted = cx.theme().muted_foreground;
+        if c.kind == "info" {
+            return div().flex().flex_col().gap_1().w_full().min_w_0().py_2()
+                .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(fg).child(c.label.clone()))
+                .child(div().text_sm().text_color(muted).w_full().min_w_0()
+                    .child(c.current.as_str().map(str::to_string).unwrap_or_else(|| c.current.to_string())))
+                .into_any_element();
+        }
         let id = c.id.clone();
         let label_block = div()
             .flex()
@@ -2972,7 +3161,7 @@ impl AppView {
         let instant = self.settings.instant_apply;
 
         // Quiet one-line summary under the name: brand, link and battery.
-        let mut facts = vec![tile.display_brand.clone()];
+        let mut facts = vec![tile.display_brand.clone(), format!("USB {}", tile.usb_id)];
         if let TileStatus::Connected(r) = &tile.status {
             if let Some(c) = &r.connection {
                 facts.push(c.clone());
@@ -3006,7 +3195,7 @@ impl AppView {
                             .text_xl()
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(fg)
-                            .child(if tile.name.is_empty() { "Unknown device".to_string() } else { tile.name.clone() }),
+                            .child(if tile.name.is_empty() { "Unknown device".to_string() } else { tile.display_name().to_string() }),
                     )
                     .child(div().text_sm().text_color(muted).child(facts.join("  ·  "))),
             );
@@ -3024,6 +3213,19 @@ impl AppView {
         };
 
         let content: AnyElement = match &tile.status {
+            TileStatus::Connected(r) if self.devices.tab == DeviceTab::Firmware => self.render_firmware(tile,r,cx),
+            TileStatus::Connected(r) if r.keyboard => {
+                let mut col = div().flex().flex_col().gap_3().w_full().min_w_0().max_w(px(720.))
+                    .child(div().text_lg().child(if self.devices.tab == DeviceTab::Advanced { "Keyboard details" } else { "Keyboard lighting" }))
+                    .child(div().text_sm().text_color(muted).child(if self.devices.tab == DeviceTab::Advanced { "Information reported by your keyboard." } else { "Quit Logitech G HUB before changing lighting. Cycling runs while OpenMouse is open and pauses if G HUB is detected." }));
+                let sections = if self.devices.tab == DeviceTab::Advanced { &r.tabs.advanced } else { &r.tabs.keyboard_lighting };
+                for section in sections {
+                    for control in &section.controls { col = col.child(self.render_control(control, cx)); }
+                }
+                if self.devices.writing.is_some() { col = col.child(div().text_sm().text_color(muted).child("Applying lighting…")); }
+                if let Some(error) = &self.devices.write_error { col = col.child(div().text_sm().text_color(cx.theme().danger).child(format!("Could not apply: {error}"))); }
+                col.into_any_element()
+            },
             TileStatus::Connected(r) if self.devices.tab != DeviceTab::Performance => self.render_extra_tab(r, cx),
             TileStatus::Connected(r) => {
                 let mut col = div().flex().flex_col().gap_3().flex_1().min_w_0().max_w(px(720.));
@@ -3215,17 +3417,28 @@ impl AppView {
                 }
                 col.into_any_element()
             }
-            TileStatus::Failed(error) => div()
-                .text_sm()
-                .text_color(cx.theme().danger)
-                .child(format!("Could not read this device: {error}"))
-                .into_any_element(),
+            TileStatus::Failed(_) if tile.powerplay => div().flex().flex_col().gap_3()
+                .child(div().text_sm().text_color(muted)
+                    .child("POWERPLAY charging pad and receiver detected. No supported mouse is responding through this interface. Charging status and pad settings are not available in OpenMouse."))
+                .when(tile.usb_id != "046D:C53A", |col| {
+                    let key = tile.key.clone();
+                    col.child(Button::new("reset-receiver-label").compact().label("Reset receiver label")
+                        .on_click(cx.listener(move |this, _, _, cx| this.identify_powerplay(&key, false, cx))))
+                }).into_any_element(),
+            TileStatus::Failed(error) => div().flex().flex_col().gap_3()
+                .child(div().text_sm().text_color(cx.theme().danger).child(format!("Could not read this device: {error}")))
+                .when(tile.usb_id == "046D:C539", |col| {
+                    let key = tile.key.clone();
+                    col.child(div().text_sm().text_color(muted).child("If you confirmed this receiver belongs to your POWERPLAY pad, save its identity below."))
+                        .child(Button::new("identify-powerplay").compact().label("Identify as POWERPLAY")
+                            .on_click(cx.listener(move |this, _, _, cx| this.identify_powerplay(&key, true, cx))))
+                }).into_any_element(),
             _ => div().text_sm().text_color(muted).child("Connecting…").into_any_element(),
         };
 
         let firmware = match &tile.status {
             TileStatus::Connected(r) if !r.firmware.is_empty() => {
-                Some(format!("Firmware {}", r.firmware.join(" · ")))
+                Some(r.firmware.join(" · "))
             }
             _ => None,
         };
@@ -3239,7 +3452,7 @@ impl AppView {
         let (has_buttons, has_lighting, has_advanced, has_profiles) = match &tile.status {
             TileStatus::Connected(r) => (
                 !r.tabs.buttons.is_empty() || r.onboard_profiles,
-                r.tabs.lighting.is_some(),
+                r.tabs.lighting.is_some() || !r.tabs.keyboard_lighting.is_empty(),
                 !r.tabs.advanced.is_empty(),
                 r.onboard_profiles,
             ),
@@ -3251,6 +3464,7 @@ impl AppView {
             (DeviceTab::Lighting, has_lighting),
             (DeviceTab::Advanced, has_advanced),
             (DeviceTab::Profiles, has_profiles),
+            (DeviceTab::Firmware, true),
         ]
         .into_iter()
         .filter_map(|(tab, shown)| shown.then_some(tab))
@@ -3394,9 +3608,9 @@ impl AppView {
                             .child("Overview"),
                     )
                     .child(div().text_sm().text_color(muted).child(match devices.tiles.len() {
-                        0 => "No mouse connected".to_string(),
-                        1 => "1 supported device found".to_string(),
-                        n => format!("{n} supported devices found"),
+                        0 => "No supported USB devices detected".to_string(),
+                        1 => "1 USB device found".to_string(),
+                        n => format!("{n} USB devices found"),
                     })),
             )
             .child(
@@ -3483,6 +3697,10 @@ impl AppView {
                 TileStatus::Connecting => {
                     details = details.child(div().text_sm().text_color(muted).child("Connecting…"));
                 }
+                TileStatus::Failed(_) if tile.powerplay => {
+                    details = details.child(div().text_sm().text_color(muted)
+                        .child("POWERPLAY receiver detected. No supported mouse is responding through this interface."));
+                }
                 TileStatus::Failed(error) => {
                     details = details
                         .child(
@@ -3536,7 +3754,7 @@ impl AppView {
                                         .child(if tile.name.is_empty() {
                                             "Unknown device".to_string()
                                         } else {
-                                            tile.name.clone()
+                                            tile.display_name().to_string()
                                         }),
                                 )
                                 .child(tags),
@@ -3563,12 +3781,14 @@ impl AppView {
                 let key = t.key.clone();
                 let active = i == devices.selected;
                 let (status_line, status_color) = match &t.status {
+                    TileStatus::Idle | TileStatus::Connecting if t.identifying_receiver() => ("Identifying device…".to_string(), muted),
                     TileStatus::Idle => ("Click to connect".to_string(), muted),
                     TileStatus::Connecting => ("Connecting…".to_string(), muted),
                     // A wireless mouse that is off or asleep answers nothing; say what to do.
                     TileStatus::Failed(error) if error.to_lowercase().contains("asleep") || error.to_lowercase().contains("out of range") => {
                         ("Asleep or out of range — wake it, then click to retry".to_string(), cx.theme().danger)
                     }
+                    TileStatus::Failed(_) if t.powerplay => ("Receiver detected · no supported mouse responding".to_string(), muted),
                     TileStatus::Failed(_) => ("Couldn't connect — click to retry".to_string(), cx.theme().danger),
                     TileStatus::Connected(r) => {
                         let mut parts = Vec::new();
@@ -3609,7 +3829,7 @@ impl AppView {
                                 .child(if t.name.is_empty() {
                                     "Unknown device".to_string()
                                 } else {
-                                    t.name.clone()
+                                    t.display_name().to_string()
                                 }),
                         )
                         .child(div().text_sm().text_color(status_color).child(status_line))
@@ -3672,6 +3892,7 @@ impl AppView {
         let border = cx.theme().border;
         let name = self.game_name(game_id);
         let target = self.profile_target();
+        let macro_game = game_id.to_owned();
 
         let header = h_flex()
             .gap_3()
@@ -3693,7 +3914,9 @@ impl AppView {
                     .flex_col()
                     .child(div().text_xl().font_weight(FontWeight::SEMIBOLD).text_color(fg).child(name))
                     .child(div().text_sm().text_color(muted).child("Device profile")),
-            );
+            )
+            .child(self.render_game_art_actions(game_id, cx))
+            .child(Button::new("game-macros").label("Macros").on_click(cx.listener(move |this, _, _, cx| { this.macro_scope = Some(macro_game.clone()); this.macro_selected = None; this.page = Page::Macros; cx.notify(); })));
 
         // Device picker: one chip per device. A device that isn't connected yet is
         // connected when picked, since its options come from the device itself.
@@ -3704,7 +3927,7 @@ impl AppView {
             for (i, tile) in self.devices.tiles.iter().enumerate() {
                 let key = tile.key.clone();
                 let has_profile = self.profiles.get(game_id, &tile.key).is_some_and(|p| p.is_meaningful());
-                let label = if tile.name.is_empty() { "Unknown device".to_string() } else { tile.name.clone() };
+                let label = if tile.name.is_empty() { "Unknown device".to_string() } else { tile.display_name().to_string() };
                 row = row.child(self.chip(
                     format!("pf-device-{}", tile.key),
                     if has_profile { format!("{label} ●") } else { label },
@@ -3755,7 +3978,7 @@ impl AppView {
                             .child(div().text_xs().text_color(muted).child(hint.to_string()))
                     };
                     let id = game_id.to_string();
-                    let mut col = div().flex().flex_col().gap_3().max_w(px(720.));
+                    let mut col = div().flex().flex_col().gap_3().w_full().min_w_0().max_w(px(720.));
                     let has_options = r.dpi.is_some() || !r.polling_rates.is_empty() || !r.lod_options.is_empty() || r.surface.is_some();
                     if !has_options {
                         col = col.child(div().text_sm().text_color(muted).child(
@@ -3961,7 +4184,7 @@ impl AppView {
     /// falls back to a name-initial tile until prefetch completes.
     fn render_games(&self, cx: &mut Context<Self>) -> AnyElement {
         let (installed, rest): (Vec<&Game>, Vec<&Game>) =
-            self.games.iter().partition(|g| g.installed || g.running);
+            self.games.iter().partition(|g| g.installed || g.running || g.executable_path.is_some());
         let running = self.games.iter().filter(|g| g.running).count();
         let profiles = self.games.iter().filter(|g| self.profiles.has_any(&g.id)).count();
         let fg = cx.theme().foreground;
@@ -3990,6 +4213,7 @@ impl AppView {
                     .child(div().text_xl().font_weight(FontWeight::SEMIBOLD).text_color(fg).child("Games"))
                     .child(div().text_sm().text_color(muted).child(subtitle)),
             )
+            .child(Button::new("add-custom-game").label("Add game").on_click(cx.listener(|this, _, _, cx| this.add_custom_game(cx))))
             .child(self.render_game_section(cx, "Installed & running", "Pick a game to give it its own mouse profile.", &installed, false))
             .child(self.render_game_section(cx, "More games", "Not found on this PC. Profiles you set up still apply once they are installed.", &rest, true))
             .into_any_element()
@@ -4061,6 +4285,8 @@ impl AppView {
         // Remote `img(url)` is not used: desktop GPUI ships no HTTP client
         // (`with_http_client` is web-backend-only), so URLs would stay blank.
         let art = match crate::games::cached_art_path(game) {
+            Some(path) if games::uses_executable_icon(game) => div().w_full().h(px(ART_H)).flex().items_center().justify_center()
+                .bg(Hsla { a: 0.06, ..accent }).child(img(path).size(px(96.)).object_fit(ObjectFit::Contain)).into_any_element(),
             Some(path) => div()
                 .w_full()
                 .h(px(ART_H))
@@ -4292,7 +4518,7 @@ impl AppView {
                                 div()
                                     .text_sm()
                                     .text_color(cx.theme().muted_foreground)
-                                    .child("Appearance and app preferences"),
+                                    .child(format!("Version {APP_VERSION} · Build {}", env!("OPENMOUSE_BUILD"))),
                             ),
                     )
                     .child(

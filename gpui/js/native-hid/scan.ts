@@ -1,3 +1,4 @@
+import { readLogitechFirmwareDetails } from "./firmware-info";
 // Two separate operations, deliberately kept apart:
 //
 // - `listCandidateInterfaces()` only enumerates HID interfaces (a plain
@@ -77,6 +78,7 @@ export interface ConnectedDevice {
    * subset, so asking the wrong class offers values the mouse rejects.
    */
   driver: string;
+  kind?: "keyboard";
 }
 
 function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
@@ -135,8 +137,11 @@ async function connectToInterfaceLocked(info: HidInterfaceInfo): Promise<Connect
     try {
       await withTimeout(client.open(), OPEN_TIMEOUT_MS, `${name}.open()`);
       const status = await withTimeout(client.readStatus(), READ_STATUS_TIMEOUT_MS, `${name}.readStatus()`);
+      if (candidate.brand === "Logitech") {
+        try {(status as any).firmwareDetails=await withTimeout(readLogitechFirmwareDetails(client,candidate.kind === "keyboard"),15000,"Firmware details");} catch { /* Optional details never prevent connecting. */ }
+      }
       await client.close().catch(() => undefined);
-      return { key: info.key, brand: candidate.brand, status, driver: name };
+      return { key: info.key, brand: candidate.brand, status, driver: name, kind: candidate.kind };
     } catch (error) {
       await client.close().catch(() => undefined);
       const message = error instanceof Error ? error.message : String(error);

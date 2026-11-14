@@ -1,3 +1,6 @@
+import { LOGITECH_RECEIVER_PRODUCTS } from "@openmouse/keyboard-protocol/logitech";
+import { keyboardArt } from "./native-hid/keyboard-art";
+import { keyboardTabs, writeKeyboardLighting, keyboardCycleNote, takeKeyboardCycleErrors, scheduleKeyboardLightingRestore, loadKeyboardLightingMemory } from "./native-hid/keyboard-lighting";
 // Entry for the JS bundle embedded in the GPUI app (see build.mjs). Exposes
 // the same list/connect flow the Tauri app runs (src/native-hid/scan.ts),
 // bundled unmodified, behind two JSON-in/JSON-out functions for Rust.
@@ -21,6 +24,12 @@ const lastCaps = new Map<string, any>();
 const mockWanted = (): string => String((globalThis as any).__mock ?? "");
 
 (globalThis as any).__api = {
+  async restoreKeyboardLighting(): Promise<string> {
+    await loadKeyboardLightingMemory();
+    scheduleKeyboardLightingRestore([...lastList.values()].filter(c=>lastStatus.get(c.info.key)?.ui?.settingsReady===false && lastStatus.get(c.info.key)?.logitech).map(c=>({info:c.info,name:lastStatus.get(c.info.key).name})));
+    return "{}";
+  },
+  async keyboardCycleErrors(): Promise<string> { return JSON.stringify(takeKeyboardCycleErrors()); },
   async listCandidates(): Promise<string> {
     // A trailing "!" on OPENMOUSE_MOCK (e.g. "ulx!") lists only the fakes.
     const candidates = mockWanted().endsWith("!") ? [] : await listCandidateInterfaces();
@@ -35,6 +44,8 @@ const mockWanted = (): string => String((globalThis as any).__mock ?? "");
   /** Artwork for a device: URL plus the box-relative placement `deviceArtStyle` computes in the Tauri app. */
   async deviceImage(argsJson: string): Promise<string> {
     const [key, name] = JSON.parse(argsJson) as [string, string];
+    const keyboard = keyboardArt(name);
+    if (keyboard) return JSON.stringify(keyboard);
     const filename = deviceImageFilename(key, name);
     const bounds = artBounds(filename);
     let art = null;
@@ -62,6 +73,16 @@ const mockWanted = (): string => String((globalThis as any).__mock ?? "");
     if (!candidate) throw new Error(`Unknown interface ${key}; list candidates first.`);
     const mock = isMockKey(key);
     const device = mock ? { key, brand: mockBrand(key), driver: "Mock", status: mockStatus(key) as any } : await connectToInterface(candidate.info);
+    (device.status as any).firmwareContext = {receiverConnected:candidate.info.vendorId===0x046d && LOGITECH_RECEIVER_PRODUCTS.has(candidate.info.productId)};
+    if ((device as any).kind === "keyboard") {
+      const status: any = device.status;
+      // The keyboard status is kept intact. Do not manufacture mouse settings
+      // or expose mouse write actions for a keyboard.
+      status.ui = { ...status.ui, pollingReadOnly: true, statusNote: keyboardCycleNote(key) ?? status.ui?.statusNote };
+      status.batteryPercent = status.logitech?.battery?.percent ?? null;
+      lastStatus.set(key, status);
+      return JSON.stringify({ ...device, displayBrand: status.brand || device.brand, controls: null, tabs: keyboardTabs(status) });
+    }
     const caps = mock ? ({ sleepTimeouts: null, lowPowerThresholds: null, debounceMaxMs: null, debounceOptions: null, dpiMax: 26000 } as any) : deviceCapabilities(candidate.info);
     // Fallback DPI limits and presets per brand, as DevicePerformanceTab.tsx has
     // them: the device's own limits win (dpiBounds), these cover drivers that
@@ -138,6 +159,10 @@ const mockWanted = (): string => String((globalThis as any).__mock ?? "");
     };
     const candidate = lastList.get(key);
     if (!candidate) throw new Error(`Unknown interface ${key}; list candidates first.`);
+    if (lastStatus.get(key)?.logitech && lastStatus.get(key)?.ui?.settingsReady === false) {
+      if (!action.startsWith("control:keyboard.")) throw new Error("This keyboard only exposes keyboard lighting actions.");
+      return JSON.stringify(await writeKeyboardLighting(candidate.info, action.slice("control:".length), value));
+    }
     const w = brand === "Logitech" ? logitechWrite : genericWrite;
     const info = candidate.info;
     if (isMockKey(key) && !action.startsWith("control:")) return JSON.stringify(value);
