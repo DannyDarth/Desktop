@@ -97,6 +97,7 @@ jobs:
       # GitHub creates the downloadable ZIP. Upload the files directly so there
       # is no ZIP nested inside another ZIP.
       - uses: actions/upload-artifact@v4
+        id: portable-artifact
         with:
           name: openmouse-windows-portable
           path: portable/*
@@ -123,8 +124,30 @@ jobs:
         run: cp gpui/installer/target/release/openmouse-installer.exe OpenMouseDesktopSetup.exe
 
       - uses: actions/upload-artifact@v4
+        id: installer-artifact
         if: (github.event_name == 'workflow_dispatch' && inputs.build_installer) || github.head_ref == 'feature/windows-game-macros' || github.ref_name == 'feature/windows-game-macros'
         with:
           name: openmouse-windows
           path: OpenMouseDesktopSetup.exe
+          if-no-files-found: error
+
+      - name: Generate download checksums
+        shell: pwsh
+        env:
+          PORTABLE_DIGEST: ${{ steps.portable-artifact.outputs.artifact-digest }}
+          INSTALLER_DIGEST: ${{ steps.installer-artifact.outputs.artifact-digest }}
+        run: |
+          if (Test-Path OpenMouseDesktopSetup.exe) {
+            node .github/scripts/sha256-files.mjs SHA256SUMS.txt OpenMouseDesktopSetup.exe
+          } else {
+            node .github/scripts/sha256-files.mjs SHA256SUMS.txt portable/OpenMouseDesktop.exe
+          }
+          "$env:PORTABLE_DIGEST  openmouse-windows-portable.zip" | Add-Content SHA256SUMS.txt
+          if ($env:INSTALLER_DIGEST) { "$env:INSTALLER_DIGEST  openmouse-windows.zip" | Add-Content SHA256SUMS.txt }
+          Get-Content SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: openmouse-windows-checksums
+          path: SHA256SUMS.txt
           if-no-files-found: error
