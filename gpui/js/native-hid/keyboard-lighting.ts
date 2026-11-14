@@ -42,6 +42,7 @@ export function scheduleKeyboardLightingRestore(devices:{info:HidInterfaceInfo,n
       try {
         for(const command of plan.commands) {
           if(restoreJobs.get(info.key)!==job || lightingMemory.revision(info.key)!==plan.revision)return;
+          if(command.id === "keyboard.effect" && command.value === "Cycling" && cycles.has(info.key)) continue;
           await writeKeyboardLighting(info,command.id,command.value,false,plan.revision);
         }
       } catch(error) {
@@ -83,10 +84,21 @@ export function keyboardTabs(status: any) {
     {id:"keyboard.note",label:"Support",kind:"info",current:status.ui?.statusNote ?? "Controls are limited to capabilities reported by this keyboard."},
   ]}]};
 }
+async function requireLightingOwnership(key:string) {
+  if (!(globalThis as any).__host?.invoke) return;
+  if (await invoke<boolean>("keyboard_lighting_conflict",{})) {
+    stopKeyboardCycle(key);
+    const message="Keyboard lighting paused: Logitech G HUB is running. Quit G HUB and its background agent, then select your lighting again.";
+    cycleErrors.set(key,message);
+    pendingCycleErrors.set(key,message);
+    throw new Error(message);
+  }
+}
 export async function writeKeyboardLighting(info: HidInterfaceInfo, id: string, value: any, remember=true, expectedRevision?:number) {
   await loadKeyboardLightingMemory();
   return withHidOpenLockRetrying(info.key, async () => {
     if(expectedRevision!==undefined && lightingMemory.revision(info.key)!==expectedRevision)return value;
+    await requireLightingOwnership(info.key);
     const client = new LogitechKeyboardHidClient(new TauriHidDevice(info, {usagePage:0xff00,usage:1}));
     try {
       await client.open();
@@ -118,6 +130,7 @@ export async function writeKeyboardLighting(info: HidInterfaceInfo, id: string, 
           animation = new KeyboardCycle(async rgb => {
             try { await withHidOpenLock(info.key, async () => {
               if (cycles.get(info.key) !== animation) return;
+              await requireLightingOwnership(info.key);
               try {
                 await client.open();
                 await transport.serialized(async () => {

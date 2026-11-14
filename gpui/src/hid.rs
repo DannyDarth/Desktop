@@ -312,6 +312,31 @@ pub struct ConnectedDevice {
     pub status: Value,
 }
 
+/// Cache only process names, never command lines or input data.
+fn ghub_lighting_conflict() -> bool {
+    #[cfg(windows)]
+    {
+        use std::sync::{Mutex, OnceLock};
+        use std::time::{Duration, Instant};
+        static CACHE: OnceLock<Mutex<Option<(Instant, bool)>>> = OnceLock::new();
+        let Ok(mut cache) = CACHE.get_or_init(|| Mutex::new(None)).lock() else { return true; };
+        if let Some((at, result)) = *cache {
+            if at.elapsed() < Duration::from_millis(500) { return result; }
+        }
+        let mut system = sysinfo::System::new();
+        system.refresh_processes_specifics(sysinfo::ProcessesToUpdate::All, true,
+            sysinfo::ProcessRefreshKind::nothing().without_tasks());
+        let found = system.processes().values().any(|process| {
+            matches!(process.name().to_string_lossy().to_ascii_lowercase().as_str(),
+                "lghub.exe" | "lghub_agent.exe")
+        });
+        *cache = Some((Instant::now(), found));
+        found
+    }
+    #[cfg(not(windows))]
+    { false }
+}
+
 enum Msg {
     Call {
         function: &'static str,
@@ -650,6 +675,7 @@ fn dispatch(
     let json = |v: &dyn erased::Ser| v.to_json();
 
     match command {
+        "keyboard_lighting_conflict"=>json(&ghub_lighting_conflict()),
         "keyboard_lighting_load"=>json(&crate::lighting_preferences::load()?),
         "keyboard_lighting_save"=> {
             let entries:Vec<crate::lighting_preferences::Preference>=serde_json::from_value(args.get("entries").cloned().ok_or("Missing lighting preferences.")?).map_err(|e|e.to_string())?;

@@ -3170,7 +3170,7 @@ impl AppView {
             TileStatus::Connected(r) if r.keyboard => {
                 let mut col = div().flex().flex_col().gap_3().w_full().min_w_0().max_w(px(720.))
                     .child(div().text_lg().child(if self.devices.tab == DeviceTab::Advanced { "Keyboard details" } else { "Keyboard lighting" }))
-                    .child(div().text_sm().text_color(muted).child(if self.devices.tab == DeviceTab::Advanced { "Information reported by your keyboard." } else { "Lighting you set here is re-applied when a game starts. Cycling runs while OpenMouse is open." }));
+                    .child(div().text_sm().text_color(muted).child(if self.devices.tab == DeviceTab::Advanced { "Information reported by your keyboard." } else { "Quit Logitech G HUB before changing lighting. Cycling runs while OpenMouse is open and pauses if G HUB is detected." }));
                 let sections = if self.devices.tab == DeviceTab::Advanced { &r.tabs.advanced } else { &r.tabs.keyboard_lighting };
                 for section in sections {
                     for control in &section.controls { col = col.child(self.render_control(control, cx)); }

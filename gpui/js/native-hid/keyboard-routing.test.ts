@@ -44,6 +44,25 @@ try {
   await assert.rejects(writeKeyboardLighting(info(0xc359) as any,"keyboard.color","#garbage"));
   assert.equal(calls.filter(Array.isArray).length,writes,"Invalid values never write to the device");
   assert.equal(calls.at(-1),"close","The HID handle closes after rejection");
+  const previousHost=(globalThis as any).__host;
+  let conflict=true;
+  (globalThis as any).__host={invoke:async(command:string)=>JSON.stringify(command === "keyboard_lighting_conflict" ? conflict : [])};
+  try {
+    const before=calls.length;
+    await assert.rejects(writeKeyboardLighting(info(0xc359) as any,"keyboard.effect","Cycling"),/G HUB is running/);
+    await assert.rejects(writeKeyboardLighting(info(0xc359) as any,"keyboard.color","#ffffff"),/G HUB is running/);
+    assert.equal(calls.length,before,"G HUB conflict must be rejected before opening or writing HID");
+    conflict=false;
+    await writeKeyboardLighting(info(0xc359) as any,"keyboard.effect","Cycling");
+    const started=calls.length;
+    conflict=true;
+    await new Promise(resolve=>setTimeout(resolve,300));
+    assert.equal(calls.length,started,"Starting G HUB during Cycling prevents the next HID frame");
+    assert.match(keyboardCycleNote(info(0xc359).key)!,/G HUB is running/);
+    conflict=false;
+    await writeKeyboardLighting(info(0xc359) as any,"keyboard.color","#ffffff");
+    assert.equal(keyboardCycleNote(info(0xc359).key),undefined,"Manual selection works again after G HUB exits");
+  } finally { (globalThis as any).__host=previousHost; }
 } finally { for (const [key,value] of originals) prototype[key]=value; }
 console.log("Keyboard lighting checks passed (capabilities, writes, validation and cleanup).");
 
