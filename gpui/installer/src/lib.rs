@@ -1,4 +1,5 @@
 mod app_lock;
+mod startup;
 #[cfg(windows)]
 mod cleanup;
 pub mod colors;
@@ -64,6 +65,7 @@ pub fn install(desktop_shortcut: bool, mut report: impl FnMut(StepUpdate)) -> Re
 
     // Registry last: if anything above failed, Add/Remove Programs never
     // learns about a half-written install.
+    startup::update_existing()?;
     registry::write()
 }
 
