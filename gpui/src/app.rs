@@ -375,6 +375,17 @@ struct Tile {
     status: TileStatus,
 }
 
+impl Tile {
+    fn identifying_receiver(&self) -> bool {
+        matches!(self.status, TileStatus::Idle | TileStatus::Connecting)
+            && (self.powerplay || self.name.to_ascii_lowercase().contains("receiver"))
+    }
+
+    fn display_name(&self) -> &str {
+        if self.identifying_receiver() { "USB Receiver" } else { &self.name }
+    }
+}
+
 struct LoadedArt {
     path: std::path::PathBuf,
     placement: Option<crate::hid::ArtPlacement>,
@@ -2462,6 +2473,13 @@ impl AppView {
 
     fn device_art(&self, tile: &Tile, side: f32, zoom: f32) -> Div {
         let frame = div().relative().flex_none().w(px(side)).h(px(side)).overflow_hidden();
+        if tile.identifying_receiver() {
+            return frame.flex().items_center().justify_center().child(
+                div().flex().flex_col().items_center().gap_3()
+                    .child(div().w(px(52.)).h(px(76.)).rounded_lg()
+                        .border_2().border_color(rgb(0x67727a)).bg(rgb(0x292e33)))
+                    .child(div().text_sm().text_color(rgb(0x9da7ae)).child("Identifying device…")));
+        }
         if tile.powerplay && !matches!(tile.status, TileStatus::Connected(_)) {
             return frame.flex().items_center().justify_center().child(
                 div().relative().w(relative(0.9)).h(relative(0.68)).rounded_xl()
@@ -3177,7 +3195,7 @@ impl AppView {
                             .text_xl()
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(fg)
-                            .child(if tile.name.is_empty() { "Unknown device".to_string() } else { tile.name.clone() }),
+                            .child(if tile.name.is_empty() { "Unknown device".to_string() } else { tile.display_name().to_string() }),
                     )
                     .child(div().text_sm().text_color(muted).child(facts.join("  ·  "))),
             );
@@ -3736,7 +3754,7 @@ impl AppView {
                                         .child(if tile.name.is_empty() {
                                             "Unknown device".to_string()
                                         } else {
-                                            tile.name.clone()
+                                            tile.display_name().to_string()
                                         }),
                                 )
                                 .child(tags),
@@ -3763,6 +3781,7 @@ impl AppView {
                 let key = t.key.clone();
                 let active = i == devices.selected;
                 let (status_line, status_color) = match &t.status {
+                    TileStatus::Idle | TileStatus::Connecting if t.identifying_receiver() => ("Identifying device…".to_string(), muted),
                     TileStatus::Idle => ("Click to connect".to_string(), muted),
                     TileStatus::Connecting => ("Connecting…".to_string(), muted),
                     // A wireless mouse that is off or asleep answers nothing; say what to do.
@@ -3810,7 +3829,7 @@ impl AppView {
                                 .child(if t.name.is_empty() {
                                     "Unknown device".to_string()
                                 } else {
-                                    t.name.clone()
+                                    t.display_name().to_string()
                                 }),
                         )
                         .child(div().text_sm().text_color(status_color).child(status_line))
@@ -3908,7 +3927,7 @@ impl AppView {
             for (i, tile) in self.devices.tiles.iter().enumerate() {
                 let key = tile.key.clone();
                 let has_profile = self.profiles.get(game_id, &tile.key).is_some_and(|p| p.is_meaningful());
-                let label = if tile.name.is_empty() { "Unknown device".to_string() } else { tile.name.clone() };
+                let label = if tile.name.is_empty() { "Unknown device".to_string() } else { tile.display_name().to_string() };
                 row = row.child(self.chip(
                     format!("pf-device-{}", tile.key),
                     if has_profile { format!("{label} ●") } else { label },
