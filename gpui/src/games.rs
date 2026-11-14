@@ -170,7 +170,7 @@ pub fn prefetch_art(games: &[Game]) {
         }
         let tmp = dir.join(format!("{}.part", game.id));
         let status = crate::proc::quiet(
-            std::process::Command::new("curl")
+            crate::proc::curl()
                 .args(["-sSfL", "-m", "20", "-o"])
                 .arg(&tmp)
                 .arg(&url)

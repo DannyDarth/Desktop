@@ -138,7 +138,7 @@ impl DeviceArt {
         }
         let tmp = dir.join(format!("{}.part", self.filename));
         let ok = crate::proc::quiet(
-            std::process::Command::new("curl")
+            crate::proc::curl()
                 .args(["-sSfL", "-m", "20", "-o"])
                 .arg(&tmp)
                 .arg(&self.url)

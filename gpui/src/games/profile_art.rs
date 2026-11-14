@@ -139,7 +139,7 @@ pub fn download_cover(app_id: u32, directory: &Path) -> Result<(), String> {
         "header.jpg",
     ] {
         let url = format!("https://cdn.cloudflare.steamstatic.com/steam/apps/{app_id}/{suffix}");
-        let mut command = std::process::Command::new("curl");
+        let mut command = crate::proc::curl();
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;

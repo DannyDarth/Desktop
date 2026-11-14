@@ -1,0 +1,31 @@
+name: Security checks
+
+on:
+  push:
+    branches: [main, gpui, feature/windows-game-macros]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  dependencies:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+      - name: Audit JavaScript dependencies
+        run: npm audit --audit-level=low
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust advisory scanner
+        run: cargo install cargo-audit --version 0.23.0 --locked
+      - name: Audit application dependencies
+        run: cargo audit --file gpui/Cargo.lock --deny unsound
+      - name: Audit installer dependencies
+        if: always()
+        run: cargo audit --file gpui/installer/Cargo.lock --deny unsound

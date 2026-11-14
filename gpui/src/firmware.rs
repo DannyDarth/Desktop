@@ -239,7 +239,7 @@ pub fn check(source: OfficialSource) -> CheckState {
         source.article
     );
     let result = crate::proc::quiet(
-        std::process::Command::new("curl")
+        crate::proc::curl()
             .args([
                 "-sSfL",
                 "--proto",
