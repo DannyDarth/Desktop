@@ -363,6 +363,7 @@ fn hex_color(hex: &str) -> Hsla {
 }
 
 struct Tile {
+    powerplay: bool,
     key: String,
     name: String,
     /// The registry's label for the driver; what gating and write routing use.
@@ -907,8 +908,9 @@ impl AppView {
                                 tile
                             },
                             None => Tile {
+                                powerplay: c.info.vendor_id == 0x046d && c.info.product_id == 0xc53a,
                                 key: c.info.key.clone(),
-                                name: c.info.product_string.clone(),
+                                name: if c.info.vendor_id == 0x046d && c.info.product_id == 0xc53a { "POWERPLAY".into() } else { c.info.product_string.clone() },
                                 brand: c.brands.first().cloned().unwrap_or_default(),
                                 display_brand: c.brands.first().cloned().unwrap_or_default(),
                                 art: None,
@@ -2445,6 +2447,18 @@ impl AppView {
     /// where the art should dominate.
     fn device_art(&self, tile: &Tile, side: f32, zoom: f32) -> Div {
         let frame = div().relative().flex_none().w(px(side)).h(px(side)).overflow_hidden();
+        if tile.powerplay && !matches!(tile.status, TileStatus::Connected(_)) {
+            return frame.flex().items_center().justify_center().child(
+                div().relative().w(relative(0.9)).h(relative(0.68)).rounded_xl()
+                    .bg(rgb(0x171a1d)).border_2().border_color(rgb(0x3b444a))
+                    .child(div().absolute().top_0().left_0().w_full().h(relative(0.18))
+                        .rounded_lg().bg(rgb(0x292e33)))
+                    .child(div().absolute().top(relative(0.28)).left_0().w_full()
+                        .text_center().text_xl().font_weight(FontWeight::BOLD)
+                        .text_color(rgb(0x45b5d1)).child("POWERPLAY"))
+                    .child(div().absolute().bottom(relative(0.12)).left_0().w_full()
+                        .text_center().text_sm().text_color(rgb(0x9da7ae)).child("Charging pad / receiver")));
+        }
         if (matches!(&tile.status, TileStatus::Connected(r) if r.keyboard) || tile.name.to_ascii_lowercase().contains("g915") || tile.name.to_ascii_lowercase().contains("keyboard")) && !tile.art.as_ref().is_some_and(|a| a.path.file_name().is_some_and(|f| f.to_string_lossy().starts_with("logitech-g915-x-"))) {
             return frame.flex().items_center().justify_center().child(Self::keyboard_graphic(side, &tile.name));
         }
@@ -3370,6 +3384,10 @@ impl AppView {
                 }
                 col.into_any_element()
             }
+            TileStatus::Failed(_) if tile.powerplay => div()
+                .text_sm().text_color(muted)
+                .child("POWERPLAY charging pad and receiver detected. No supported mouse is responding through this interface. Charging status and pad settings are not available in OpenMouse.")
+                .into_any_element(),
             TileStatus::Failed(error) => div()
                 .text_sm()
                 .text_color(cx.theme().danger)
@@ -3550,9 +3568,9 @@ impl AppView {
                             .child("Overview"),
                     )
                     .child(div().text_sm().text_color(muted).child(match devices.tiles.len() {
-                        0 => "No mouse connected".to_string(),
-                        1 => "1 supported device found".to_string(),
-                        n => format!("{n} supported devices found"),
+                        0 => "No supported USB devices detected".to_string(),
+                        1 => "1 USB device found".to_string(),
+                        n => format!("{n} USB devices found"),
                     })),
             )
             .child(
@@ -3638,6 +3656,10 @@ impl AppView {
                 }
                 TileStatus::Connecting => {
                     details = details.child(div().text_sm().text_color(muted).child("Connecting…"));
+                }
+                TileStatus::Failed(_) if tile.powerplay => {
+                    details = details.child(div().text_sm().text_color(muted)
+                        .child("POWERPLAY receiver detected. No supported mouse is responding through this interface."));
                 }
                 TileStatus::Failed(error) => {
                     details = details
@@ -3725,6 +3747,7 @@ impl AppView {
                     TileStatus::Failed(error) if error.to_lowercase().contains("asleep") || error.to_lowercase().contains("out of range") => {
                         ("Asleep or out of range — wake it, then click to retry".to_string(), cx.theme().danger)
                     }
+                    TileStatus::Failed(_) if t.powerplay => ("Receiver detected · no supported mouse responding".to_string(), muted),
                     TileStatus::Failed(_) => ("Couldn't connect — click to retry".to_string(), cx.theme().danger),
                     TileStatus::Connected(r) => {
                         let mut parts = Vec::new();
