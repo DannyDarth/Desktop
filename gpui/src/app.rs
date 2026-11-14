@@ -363,6 +363,7 @@ fn hex_color(hex: &str) -> Hsla {
 }
 
 struct Tile {
+    usb_id: String,
     powerplay: bool,
     key: String,
     name: String,
@@ -908,6 +909,7 @@ impl AppView {
                                 tile
                             },
                             None => Tile {
+                                usb_id: format!("{:04X}:{:04X}", c.info.vendor_id, c.info.product_id),
                                 powerplay: c.info.vendor_id == 0x046d && c.info.product_id == 0xc53a,
                                 key: c.info.key.clone(),
                                 name: if c.info.vendor_id == 0x046d && c.info.product_id == 0xc53a { "POWERPLAY".into() } else { c.info.product_string.clone() },
@@ -3128,7 +3130,7 @@ impl AppView {
         let instant = self.settings.instant_apply;
 
         // Quiet one-line summary under the name: brand, link and battery.
-        let mut facts = vec![tile.display_brand.clone()];
+        let mut facts = vec![tile.display_brand.clone(), format!("USB {}", tile.usb_id)];
         if let TileStatus::Connected(r) = &tile.status {
             if let Some(c) = &r.connection {
                 facts.push(c.clone());
@@ -4477,7 +4479,7 @@ impl AppView {
                                 div()
                                     .text_sm()
                                     .text_color(cx.theme().muted_foreground)
-                                    .child("Appearance and app preferences"),
+                                    .child(format!("Version {APP_VERSION} · Build {}", env!("OPENMOUSE_BUILD"))),
                             ),
                     )
                     .child(
